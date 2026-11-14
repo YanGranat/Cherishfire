@@ -1,0 +1,617 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  EXPORT_SCHEMA_VERSION,
+  MIN_SUPPORTED_EXPORT_SCHEMA_VERSION,
+  buildExportJsonFromRows as buildExportJsonFromRowsAt,
+  normalizeImportData,
+  previewImportData,
+  validateImportData,
+} from "../src/application/data-transfer/data-transfer-codec";
+import {
+  MAX_DATA_TRANSFER_IMPORT_BYTES,
+  DataTransferImportSizeError,
+  DataTransferImportSizeUnavailableError,
+  assertDataTransferImportByteLength,
+  assertDataTransferImportTextSize,
+  readBoundedDataTransferImportText,
+} from "../src/application/data-transfer/data-transfer-limits";
+import {
+  BUILTIN_COLOR_SCHEMES,
+  STATISTICS_BLOCK_ORDER_KEYS,
+} from "../src/types/settings";
+
+const root = resolve(import.meta.dirname, "..");
+const fixturePath = resolve(
+  root,
+  "scripts/fixtures/export-v5-baseline.json"
+);
+const baselineJson = readFileSync(fixturePath, "utf8");
+const baselineObject = JSON.parse(baselineJson) as Record<string, unknown>;
+type ExportBuildParams = Parameters<typeof buildExportJsonFromRowsAt>[0];
+
+function buildExportJsonFromRows(
+  params: Omit<ExportBuildParams, "exportedAt"> & {
+    exportedAt?: string;
+  },
+): string {
+  return buildExportJsonFromRowsAt({
+    ...params,
+    exportedAt:
+      params.exportedAt ?? (baselineObject.exported_at as string),
+  });
+}
+
+assert.equal(EXPORT_SCHEMA_VERSION, 5);
+assert.equal(MIN_SUPPORTED_EXPORT_SCHEMA_VERSION, 5);
+assert.equal(MAX_DATA_TRANSFER_IMPORT_BYTES, 64 * 1024 * 1024);
+assert.equal(assertDataTransferImportTextSize("ascii"), 5);
+assert.equal(assertDataTransferImportTextSize("Привет 👋"), 17);
+assert.doesNotThrow(() =>
+  assertDataTransferImportByteLength(MAX_DATA_TRANSFER_IMPORT_BYTES),
+);
+assert.throws(
+  () =>
+    assertDataTransferImportByteLength(MAX_DATA_TRANSFER_IMPORT_BYTES + 1),
+  /supported size limit/,
+);
+assert.equal(validateImportData(baselineJson).valid, true);
+assert.deepEqual(previewImportData(baselineJson), {
+  habitsCount: 2,
+  archivedHabitsCount: 1,
+  dayRecordsCount: 3,
+  notesCount: 2,
+});
+
+const normalized = normalizeImportData(baselineJson);
+const rebuiltJson = buildExportJsonFromRows({
+  habits: normalized.habits,
+  dayRecords: normalized.day_records,
+  notes: normalized.notes,
+  settings: normalized.settings,
+  exportedAt: baselineObject.exported_at as string,
+});
+assert.deepEqual(JSON.parse(rebuiltJson), baselineObject);
+assert.equal(
+  rebuiltJson,
+  baselineJson.trimEnd(),
+  "schema-v5 export bytes must remain stable apart from the fixture's final newline",
+);
+assert.equal(validateImportData(rebuiltJson).valid, true);
+
+const periodSpecificOrders = {
+  week: ["summary", "bar", "heatmap", "habit"],
+  month: ["heatmap", "habit", "summary", "bar"],
+  year: ["habit", "summary", "heatmap", "bar"],
+} as const;
+const exportWithPeriodSpecificOrders = buildExportJsonFromRows({
+  habits: normalized.habits,
+  dayRecords: normalized.day_records,
+  notes: normalized.notes,
+  settings: normalized.settings.concat(
+    ...(["week", "month", "year"] as const).map((period) => ({
+      key: STATISTICS_BLOCK_ORDER_KEYS[period],
+      value: JSON.stringify(periodSpecificOrders[period]),
+    }))
+  ),
+});
+const importedPeriodSpecificOrders = new Map(
+  normalizeImportData(exportWithPeriodSpecificOrders).settings.map((row) => [
+    row.key,
+    JSON.parse(row.value),
+  ])
+);
+for (const period of ["week", "month", "year"] as const) {
+  assert.deepEqual(
+    importedPeriodSpecificOrders.get(STATISTICS_BLOCK_ORDER_KEYS[period]),
+    periodSpecificOrders[period],
+    `${period} statistics order must survive export/import independently`
+  );
+}
+
+assert.throws(
+  () =>
+    buildExportJsonFromRows({
+      habits: normalized.habits,
+      dayRecords: normalized.day_records,
+      notes: normalized.notes,
+      settings: normalized.settings.concat({
+        key: STATISTICS_BLOCK_ORDER_KEYS.month,
+        value: JSON.stringify(["summary", "summary", "heatmap", "habit"]),
+      }),
+    }),
+  /statistics_block_order_month/
+);
+
+const existingHabitId = normalized.habits[0].id;
+const exportWithStaleDescriptionMetadata = buildExportJsonFromRows({
+  habits: normalized.habits,
+  dayRecords: normalized.day_records,
+  notes: normalized.notes,
+  settings: normalized.settings.concat(
+    {
+      key: `habit_description_lines_v1:${existingHabitId}`,
+      value: JSON.stringify(4),
+    },
+    {
+      key: "habit_description_lines_v1:999999",
+      value: JSON.stringify(7),
+    }
+  ),
+});
+const repairedDescriptionSettings = normalizeImportData(
+  exportWithStaleDescriptionMetadata
+).settings;
+assert.equal(
+  repairedDescriptionSettings.some(
+    (row) => row.key === `habit_description_lines_v1:${existingHabitId}`
+  ),
+  true,
+  "description height for an existing habit must remain exportable"
+);
+assert.equal(
+  repairedDescriptionSettings.some(
+    (row) => row.key === "habit_description_lines_v1:999999"
+  ),
+  false,
+  "stale description height for a deleted habit must not break export"
+);
+assert.throws(
+  () =>
+    buildExportJsonFromRows({
+      habits: normalized.habits,
+      dayRecords: normalized.day_records,
+      notes: normalized.notes,
+      settings: normalized.settings.concat({
+        key: "habit_description_lines_v1:broken",
+        value: JSON.stringify(4),
+      }),
+    }),
+  /description size/,
+  "malformed scoped settings must still be rejected as corruption"
+);
+
+const editableColorSettings = normalized.settings
+  .map((row) => {
+    if (row.key === "color_scheme") {
+      return { ...row, value: JSON.stringify("#123456") };
+    }
+    if (row.key === "custom_colors") {
+      return { ...row, value: JSON.stringify(["#123456"]) };
+    }
+    return row;
+  })
+  .concat({
+    key: "color_scheme_options",
+    value: JSON.stringify(["#123456", "amethyst"]),
+  });
+const editableColorExport = buildExportJsonFromRows({
+  habits: normalized.habits,
+  dayRecords: normalized.day_records,
+  notes: normalized.notes,
+  settings: editableColorSettings,
+});
+assert.deepEqual(
+  normalizeImportData(editableColorExport).settings.find(
+    (row) => row.key === "color_scheme_options"
+  ),
+  {
+    key: "color_scheme_options",
+    value: JSON.stringify(["#123456", ...BUILTIN_COLOR_SCHEMES]),
+  }
+);
+
+const builtinOverrideSettings = normalized.settings
+  .map((row) => {
+    if (row.key === "color_scheme") {
+      return { ...row, value: JSON.stringify("#123456") };
+    }
+    if (row.key === "custom_colors") {
+      return {
+        ...row,
+        value: JSON.stringify(["#654321", "#123456"]),
+      };
+    }
+    return row;
+  })
+  .concat(
+    {
+      key: "color_scheme_options",
+      value: JSON.stringify(["#654321", "#123456", "amethyst"]),
+    },
+    {
+      key: "color_scheme_builtin_overrides",
+      value: JSON.stringify({ orange: "#123456" }),
+    }
+  );
+const builtinOverrideExport = buildExportJsonFromRows({
+  habits: normalized.habits,
+  dayRecords: normalized.day_records,
+  notes: normalized.notes,
+  settings: builtinOverrideSettings,
+});
+const builtinOverrideImport = normalizeImportData(builtinOverrideExport);
+const transferredSettings = new Map(
+  builtinOverrideImport.settings.map((row) => [row.key, JSON.parse(row.value)])
+);
+const transferredOptions = transferredSettings.get(
+  "color_scheme_options"
+) as string[];
+assert.deepEqual(transferredOptions.slice(0, 4), [
+  "#654321",
+  "#123456",
+  "sunset",
+  "amber",
+]);
+assert.equal(transferredOptions.includes("orange"), false);
+assert.equal(transferredOptions.includes("blue"), true);
+assert.equal(transferredOptions.includes("amethyst"), true);
+assert.equal(
+  transferredOptions.length,
+  BUILTIN_COLOR_SCHEMES.length + 1,
+  "deleted unmodified presets must be restored by export/import"
+);
+assert.deepEqual(transferredSettings.get("custom_colors"), [
+  "#654321",
+  "#123456",
+]);
+assert.deepEqual(
+  transferredSettings.get("color_scheme_builtin_overrides"),
+  { orange: "#123456" }
+);
+
+assert.throws(
+  () =>
+    buildExportJsonFromRows({
+      habits: normalized.habits,
+      dayRecords: normalized.day_records,
+      notes: normalized.notes,
+      settings: builtinOverrideSettings.map((row) =>
+        row.key === "color_scheme_builtin_overrides"
+          ? { ...row, value: JSON.stringify({ orange: "#ABCDEF" }) }
+          : row
+      ),
+    }),
+  /color_scheme_builtin_overrides mapping/
+);
+
+assert.throws(
+  () =>
+    buildExportJsonFromRows({
+      habits: normalized.habits,
+      dayRecords: normalized.day_records,
+      notes: normalized.notes,
+      settings: editableColorSettings.map((row) =>
+        row.key === "color_scheme_options"
+          ? { ...row, value: JSON.stringify([]) }
+          : row
+      ),
+    }),
+  /Invalid setting color_scheme_options/
+);
+
+assert.throws(
+  () =>
+    buildExportJsonFromRows({
+      habits: normalized.habits,
+      dayRecords: normalized.day_records,
+      notes: normalized.notes,
+      settings: editableColorSettings.map((row) =>
+        row.key === "color_scheme_options"
+          ? { ...row, value: JSON.stringify(["amethyst"]) }
+          : row
+      ),
+    }),
+  /color_scheme_options projection|Invalid setting color_scheme/
+);
+
+function buildFixtureSettingsSignature(
+  rows: Array<{ key: string; value: string }>,
+): string {
+  const input = rows
+    .map((row) => JSON.stringify({ key: row.key, value: row.value }))
+    .sort()
+    .join("\n");
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+const tamperedBaselineWithoutOneSetting = JSON.parse(
+  baselineJson,
+) as Record<string, any>;
+tamperedBaselineWithoutOneSetting.settings =
+  tamperedBaselineWithoutOneSetting.settings.filter(
+  (setting: { key: string }) => setting.key !== "sound_enabled"
+);
+assert.equal(
+  validateImportData(JSON.stringify(tamperedBaselineWithoutOneSetting)).valid,
+  false,
+  "removing a setting without updating integrity must be rejected",
+);
+
+const validOlderBaselineWithoutOneSetting = structuredClone(
+  tamperedBaselineWithoutOneSetting,
+);
+validOlderBaselineWithoutOneSetting.integrity.settings_count =
+  validOlderBaselineWithoutOneSetting.settings.length;
+validOlderBaselineWithoutOneSetting.integrity.settings_signature =
+  buildFixtureSettingsSignature(validOlderBaselineWithoutOneSetting.settings);
+assert.equal(
+  validateImportData(JSON.stringify(validOlderBaselineWithoutOneSetting)).valid,
+  true,
+  "new app defaults must be able to fill settings absent from an older supported export"
+);
+
+const duplicateSetting = JSON.parse(baselineJson) as Record<string, any>;
+duplicateSetting.settings.push({
+  key: "theme",
+  value: JSON.stringify("light"),
+});
+const duplicateSettingResult = validateImportData(
+  JSON.stringify(duplicateSetting),
+);
+assert.equal(
+  duplicateSettingResult.valid,
+  false,
+  "a duplicate setting key must not be collapsed before integrity validation",
+);
+assert.match(duplicateSettingResult.error ?? "", /Invalid settings\[\d+\]\.key/);
+
+function mutateBaseline(
+  mutate: (value: Record<string, any>) => void
+): ReturnType<typeof validateImportData> {
+  const clone = JSON.parse(baselineJson) as Record<string, any>;
+  mutate(clone);
+  return validateImportData(JSON.stringify(clone));
+}
+
+for (const [table, field] of [
+  ["habits", "id"],
+  ["habits", "displayOrder"],
+  ["day_records", "id"],
+  ["day_records", "habitId"],
+  ["notes", "id"],
+  ["notes", "habitId"],
+] as const) {
+  const invalid = mutateBaseline((value) => {
+    value[table][0][field] = Number.MAX_SAFE_INTEGER + 1;
+  });
+  assert.equal(invalid.valid, false);
+  assert.ok(invalid.error?.includes(`${table}[0].${field}`), "unsafe integer identity must fail field validation before integrity or persistence");
+}
+assert.throws(
+  () => buildExportJsonFromRows({
+    habits: normalized.habits.map((habit, index) => index === 0 ? { ...habit, id: Number.MAX_SAFE_INTEGER + 1 } : habit),
+    dayRecords: normalized.day_records,
+    notes: normalized.notes,
+    settings: normalized.settings,
+  }),
+  /Invalid habits\[0\]\.id/,
+  "export validation must not manufacture a valid-integrity file with an unsafe persistent identity",
+);
+const largestSafeHabit = buildExportJsonFromRows({
+  habits: [{ ...normalized.habits[0], id: Number.MAX_SAFE_INTEGER, displayOrder: Number.MAX_SAFE_INTEGER }],
+  dayRecords: [],
+  notes: [],
+  settings: normalized.settings,
+});
+assert.equal(normalizeImportData(largestSafeHabit).habits[0].id, Number.MAX_SAFE_INTEGER);
+
+const oldVersion = mutateBaseline((value) => {
+  value.version = 4;
+});
+assert.equal(oldVersion.valid, false);
+assert.match(oldVersion.error ?? "", /Unsupported old export version: 4/);
+
+const futureVersion = mutateBaseline((value) => {
+  value.version = 6;
+});
+assert.equal(futureVersion.valid, false);
+assert.match(futureVersion.error ?? "", /Unsupported future export version: 6/);
+
+assert.equal(
+  mutateBaseline((value) => {
+    value.dayRecords = value.day_records;
+    delete value.day_records;
+  }).valid,
+  false,
+  "legacy camelCase dayRecords must not remain an implicit migration path"
+);
+assert.equal(
+  mutateBaseline((value) => {
+    value.habits[0].id = "1";
+  }).valid,
+  false,
+  "legacy numeric strings must not be coerced"
+);
+assert.equal(
+  mutateBaseline((value) => {
+    delete value.habits[0].archiveHistory;
+  }).valid,
+  false,
+  "baseline archive history is required"
+);
+assert.equal(
+  mutateBaseline((value) => {
+    delete value.habits[0].repeatConfig.scheduleHistory;
+  }).valid,
+  false,
+  "baseline schedule history is required"
+);
+assert.equal(
+  mutateBaseline((value) => {
+    delete value.integrity;
+  }).valid,
+  false,
+  "baseline integrity block is required"
+);
+assert.equal(
+  mutateBaseline((value) => {
+    value.notes[0].text = "tampered";
+  }).valid,
+  false,
+  "source rows must match the frozen baseline integrity signatures"
+);
+
+const invalidTheme = mutateBaseline((value) => {
+  const row = value.settings.find(
+    (setting: { key: string }) => setting.key === "theme"
+  );
+  row.value = JSON.stringify("not-a-theme");
+});
+assert.equal(invalidTheme.valid, false);
+assert.match(invalidTheme.error ?? "", /Invalid setting theme/);
+
+const duplicateScheduleBoundary = mutateBaseline((value) => {
+  const history = value.habits[0].repeatConfig.scheduleHistory;
+  history.push(structuredClone(history[0]));
+});
+assert.equal(duplicateScheduleBoundary.valid, false);
+assert.match(
+  duplicateScheduleBoundary.error ?? "",
+  /scheduleHistory order/
+);
+
+const contradictoryArchiveState = mutateBaseline((value) => {
+  value.habits[0].archiveHistory = [
+    {
+      archivedAt: Date.parse("2026-07-22T10:00:00.000Z"),
+      restoredAt: null,
+      archivedDate: "2026-07-22",
+      restoredDate: null,
+    },
+  ];
+});
+assert.equal(contradictoryArchiveState.valid, false);
+assert.match(contradictoryArchiveState.error ?? "", /active state/);
+
+const invalidBuilderSettings = normalized.settings.map((row) =>
+  row.key === "theme"
+    ? { ...row, value: JSON.stringify("not-a-theme") }
+    : row
+);
+assert.throws(
+  () =>
+    buildExportJsonFromRows({
+      habits: normalized.habits,
+      dayRecords: normalized.day_records,
+      notes: normalized.notes,
+      settings: invalidBuilderSettings,
+    }),
+  /Invalid setting theme/
+);
+
+const exportSource = readFileSync(
+  resolve(root, "src/application/data-transfer/data-transfer-codec.ts"),
+  "utf8",
+);
+assert.ok(
+  exportSource.indexOf("assertDataTransferImportTextSize(jsonString)") <
+    exportSource.indexOf("JSON.parse(jsonString)"),
+  "every codec caller must hit the size boundary before JSON.parse",
+);
+assert.doesNotMatch(exportSource, /version < 3|version < 4|version < 5/);
+assert.doesNotMatch(exportSource, /parsed\.dayRecords/);
+
+const importReaderSource = readFileSync(
+  resolve(root, "src/platform/data-transfer/select-import-file.ts"),
+  "utf8",
+);
+assert.match(
+  importReaderSource,
+  /type: "\*\/\*"/,
+  "the picker must accept valid exports whose provider reports a generic MIME type",
+);
+assert.match(
+  importReaderSource,
+  /copyToCacheDirectory: true/,
+  "the picker must expose a private local file whose real size can be inspected before reading",
+);
+assert.match(importReaderSource, /const file = new File\(asset\.uri\)/);
+assert.match(importReaderSource, /readBoundedDataTransferImportText\(\{/);
+assert.doesNotMatch(importReaderSource, /asset\.size|getInfoAsync|readAsStringAsync/);
+
+const migrationSource = readFileSync(
+  resolve(root, "drizzle/0000_lonely_victor_mancha.sql"),
+  "utf8"
+);
+const migrationRegistry = readFileSync(
+  resolve(root, "drizzle/migrations.js"),
+  "utf8"
+);
+const migrationJournal = JSON.parse(
+  readFileSync(resolve(root, "drizzle/meta/_journal.json"), "utf8")
+) as { entries: { idx: number; when: number }[] };
+assert.match(migrationSource, /`reason_type` text/);
+assert.match(migrationSource, /`archive_history` text DEFAULT '\[\]' NOT NULL/);
+assert.doesNotMatch(migrationSource, /ALTER TABLE|UPDATE `habits`|DELETE FROM/);
+assert.deepEqual(migrationJournal.entries.length, 1);
+assert.doesNotMatch(migrationRegistry, /m0001|m0002/);
+const legacyLastMigrationTimestamp = 1784800000000;
+for (const entry of migrationJournal.entries.slice(1)) {
+  assert.ok(
+    entry.when > legacyLastMigrationTimestamp,
+    "every post-1.3.55 migration timestamp must sort after previously released migrations"
+  );
+}
+
+async function auditBoundedImportRead(): Promise<void> {
+  let readCalls = 0;
+  const accepted = await readBoundedDataTransferImportText({
+    getByteLength: () => 5,
+    readText: async () => {
+      readCalls += 1;
+      return "ascii";
+    },
+  });
+  assert.deepEqual(accepted, { text: "ascii", byteLength: 5 });
+  assert.equal(readCalls, 1);
+
+  readCalls = 0;
+  await assert.rejects(
+    readBoundedDataTransferImportText({
+      getByteLength: () => undefined,
+      readText: async () => {
+        readCalls += 1;
+        return "must not be read";
+      },
+    }),
+    DataTransferImportSizeUnavailableError,
+  );
+  assert.equal(
+    readCalls,
+    0,
+    "a file with unknown size must never be loaded into JS memory",
+  );
+
+  readCalls = 0;
+  await assert.rejects(
+    readBoundedDataTransferImportText({
+      getByteLength: () => MAX_DATA_TRANSFER_IMPORT_BYTES + 1,
+      readText: async () => {
+        readCalls += 1;
+        return "must not be read";
+      },
+    }),
+    DataTransferImportSizeError,
+  );
+  assert.equal(
+    readCalls,
+    0,
+    "an oversized file must be rejected before entering JS memory",
+  );
+}
+
+void auditBoundedImportRead()
+  .then(() => {
+    console.log("Export compatibility baseline audit passed.");
+  })
+  .catch((error: unknown) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

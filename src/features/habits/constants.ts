@@ -1,0 +1,1 @@
+export const MAIN_CALENDAR_FUTURE_DAYS = 2;

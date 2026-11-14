@@ -1,0 +1,77 @@
+{
+  "expo": {
+    "name": "Cherishfire",
+    "slug": "cherishfire",
+    "version": "1.5.112",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#121212"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.cherishfire.app",
+      "buildNumber": "196"
+    },
+    "android": {
+      "allowBackup": false,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#121212"
+      },
+      "softwareKeyboardLayoutMode": "resize",
+      "package": "com.cherishfire.app",
+      "versionCode": 196,
+      "permissions": ["android.permission.POST_NOTIFICATIONS"],
+      "blockedPermissions": [
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "./plugins/with-transparent-navigation-bar",
+      "expo-localization",
+      "expo-sqlite",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#FF5A2A",
+          "defaultChannel": "habit-reminders"
+        }
+      ],
+      "@react-native-community/datetimepicker",
+      "./plugins/with-android-image-codecs",
+      [
+        "expo-asset",
+        {
+          "assets": ["./assets/third_party_notices.json"]
+        }
+      ],
+      "expo-font"
+    ],
+    "scheme": "cherishfire",
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "a682d2a4-4d2b-4d08-8330-77ca4fa08901"
+      }
+    }
+  }
+}
