@@ -25,6 +25,8 @@ import { parseHabitRouteId } from "../src/domain/habits/route-id";
 import { mergeRecoveredDraft } from "../src/utils/recovered-draft";
 import type { Note } from "../src/types/note";
 import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-audit";
+import { loadHabitStoreForAudit } from "./fixtures/load-habit-store-for-audit";
+import { loadSqliteRepositoriesForAudit } from "./fixtures/load-sqlite-repositories-for-audit";
 interface Deferred<T> {
   readonly promise: Promise<T>;
   resolve(value: T): void;
@@ -41,6 +43,195 @@ function deferred<T>(): Deferred<T> {
 }
 async function flushMicrotasks(count = 8): Promise<void> {
   for (let index = 0; index < count; index += 1) await Promise.resolve();
+}
+async function auditExternalNotesWrites(): Promise<void> {
+  clearCachedNotes();
+  const repositories = loadSqliteRepositoriesForAudit();
+  try {
+    const { createHabitPersistenceApplication } = await import(
+      "../src/application/habits/habit-persistence"
+    );
+    const persistence = createHabitPersistenceApplication(repositories.habits);
+    const now = new Date();
+    const civilDate = (date: Date) =>
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    const previousDate = new Date(now);
+    previousDate.setDate(previousDate.getDate() - 1);
+    const today = civilDate(now);
+    const yesterday = civilDate(previousDate);
+    const habit = await persistence.createHabit({
+      resolveDisplayOrderFromStorage: false,
+      habit: {
+        name: "Walking",
+        description: null,
+        descriptionVisible: true,
+        repeatSchedule: { type: "daily" },
+        scheduleHistory: [
+          {
+            effectiveFrom: yesterday,
+            startDate: yesterday,
+            repeatSchedule: { type: "daily" },
+          },
+        ],
+        startDate: yesterday,
+        reminderEnabled: false,
+        reminderTime: null,
+        displayOrder: 0,
+        isArchived: false,
+        archivedAt: null,
+        archiveHistory: [],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    });
+    await persistence.markDay({
+      habitId: habit.id,
+      date: yesterday,
+      status: "failure",
+      reason: "Weather",
+      now: 1,
+    });
+    const ordinaryNote = await repositories.notes.createNote({
+      habitId: habit.id,
+      date: yesterday,
+      text: "Evening walk",
+      isFailureReason: false,
+      reasonType: null,
+      createdAt: 2,
+      updatedAt: 2,
+    });
+    const application = createNotesApplication(repositories.notes, {
+      waitForCommitOpportunity: async () => {},
+      now: () => now,
+    });
+    let paint = deferred<void>();
+    const invalidations: number[] = [];
+    const loaded = loadHabitStoreForAudit(
+      { habits: [], records: [] },
+      {
+        waitForCommitOpportunity: () => paint.promise,
+        notesProjection: {
+          invalidate(id, change) {
+            invalidations.push(id);
+            application.invalidate(id, change);
+          },
+          invalidateAll: application.invalidateAll,
+        },
+      },
+    );
+    Object.assign(loaded.persistence.application, persistence);
+    const store = loaded.storeModule.useHabitStore;
+    await store.getState().loadHabits();
+    await store.getState().loadAllDayRecords();
+    await application.prewarm(habit.id);
+    const session = application.getSession(habit.id);
+    const originalKey = session
+      .getSnapshot()
+      .notes.find((row) => row.id === ordinaryNote.id)!.clientMutationId;
+    let supersedingSchedule: Promise<void> | null = null;
+    loaded.persistence.application.persistScheduleEdit = async (input) => {
+      const result = await persistence.persistScheduleEdit(input);
+      if (result.kind === "updated" && result.removedRecordDates.length > 0) {
+        paint = deferred<void>();
+        supersedingSchedule = store.getState().updateHabit(habit.id, {
+          repeatSchedule: { type: "interval", every: 2 },
+        });
+      }
+      return result;
+    };
+
+    const scheduleWrite = store
+      .getState()
+      .updateHabit(habit.id, { startDate: today });
+    await application.prewarm(habit.id);
+    await session.ensureLoaded(() => true);
+    assert.equal(session.getSnapshot().notes.length, 2);
+    paint.resolve();
+    await scheduleWrite;
+    assert.equal(
+      invalidations.length,
+      3,
+      "a committed schedule deletion must invalidate even when a newer schedule owns the visible state",
+    );
+    assert.equal(
+      getCachedNotes(habit.id),
+      null,
+      "a committed external deletion must retire reads made during its pending write",
+    );
+    assert.deepEqual(
+      session.getSnapshot().notes.map((row) => row.id),
+      [ordinaryNote.id],
+      "the committed prune must remove generated reasons before any refresh frame",
+    );
+    assert.equal(session.getSnapshot().notes[0].clientMutationId, originalKey);
+    await session.ensureLoaded(() => true);
+    assert.deepEqual(
+      session.getSnapshot().notes.map((row) => row.id),
+      [ordinaryNote.id],
+      "a committed schedule prune must remove its generated reason from the live session",
+    );
+    assert.equal(session.getSnapshot().notes[0].clientMutationId, originalKey);
+    assert.equal((await repositories.notes.getNotesForHabit(habit.id)).length, 1);
+    loaded.persistence.application.persistScheduleEdit = persistence.persistScheduleEdit;
+    paint.resolve();
+    await supersedingSchedule;
+
+    loaded.persistence.application.markDay = async (input) => {
+      await application.prewarm(habit.id);
+      await session.ensureLoaded(() => true);
+      assert.equal(session.getSnapshot().notes.length, 1);
+      return persistence.markDay(input);
+    };
+    paint = deferred<void>();
+    const markWrite = store.getState().markDay(habit.id, today, "skipped", "Travel");
+    await session.ensureLoaded(() => true);
+    await application.prewarm(habit.id);
+    paint.resolve();
+    await markWrite;
+    assert.equal(getCachedNotes(habit.id), null);
+    await session.ensureLoaded(() => true);
+    assert.equal(session.getSnapshot().notes.length, 2);
+    assert.equal(session.getSnapshot().notes[0].clientMutationId, originalKey);
+
+    const originalScheduleWrite = persistence.persistScheduleEdit;
+    loaded.persistence.application.persistScheduleEdit = async () => {
+      throw new Error("Expected schedule failure");
+    };
+    const invalidationsBeforeFailure = invalidations.length;
+    await assert.rejects(
+      store.getState().updateHabit(habit.id, { startDate: yesterday }),
+      /Expected schedule failure/,
+    );
+    assert.equal(invalidations.length, invalidationsBeforeFailure + 1);
+    await session.ensureLoaded(() => true);
+    assert.equal(session.getSnapshot().notes.length, 2);
+    loaded.persistence.application.persistScheduleEdit = originalScheduleWrite;
+
+    loaded.persistence.application.deleteHabits = async (ids) => {
+      await application.prewarm(habit.id);
+      await session.ensureLoaded(() => true);
+      assert.equal(session.getSnapshot().notes.length, 2);
+      return persistence.deleteHabits(ids);
+    };
+    paint = deferred<void>();
+    const deletion = store.getState().deleteHabit(habit.id);
+    await session.ensureLoaded(() => true);
+    await application.prewarm(habit.id);
+    paint.resolve();
+    await deletion;
+    assert.equal(getCachedNotes(habit.id), null);
+    assert.equal(session.getSnapshot().status, "missing");
+    assert.equal(session.getSnapshot().habitExists, false);
+    assert.deepEqual(session.getSnapshot().notes, []);
+    await session.ensureLoaded(() => null);
+    assert.equal(session.getSnapshot().status, "missing");
+    assert.equal(session.getSnapshot().notes.length, 0);
+    assert.equal((await repositories.notes.getNotesForHabit(habit.id)).length, 0);
+    await repositories.runtime.whenIdle();
+  } finally {
+    repositories.database.close();
+    clearCachedNotes();
+  }
 }
 function note(id: number, habitId = id): Note {
   return {
@@ -852,6 +1043,168 @@ async function main() {
     [5123],
     "an invalidated load must restart only for the consumer that requested it",
   );
+  for (const [caseIndex, command] of ["create", "update", "delete"].entries()) {
+    for (const fail of [false, true]) {
+      const habitId = 520 + caseIndex * 2 + Number(fail);
+      const original = note(habitId * 10, habitId);
+      existingHabits.add(habitId);
+      repositoryRows.set(habitId, [original]);
+      const cached = captureNotesCacheReadToken(habitId);
+      assert.equal(setCachedNotesIfCurrent(cached, [original]), true);
+      const session = application.getSession(habitId);
+      const originalKey = session.getSnapshot().notes[0].clientMutationId;
+      const generation = session.getSnapshot().generation;
+      const gate = deferred<void>();
+      if (command === "create") createGates.push(gate);
+      else if (command === "update") updateGates.push(gate);
+      else deleteGates.push(gate);
+      const submitted =
+        command === "create"
+          ? session.create("New paragraph")
+          : command === "update"
+            ? session.update(original.id, "Edited paragraph")
+            : session.delete(original.id);
+      assert.equal(submitted.accepted, true);
+      const optimistic = session.getSnapshot().notes;
+      await flushMicrotasks();
+      application.invalidate(habitId);
+      assert.deepEqual(
+        session.getSnapshot().notes,
+        optimistic,
+        "same-habit invalidation must retain accepted note commands and editor identity",
+      );
+      assert.equal(session.getSnapshot().habitExists, true);
+      assert.equal(session.getSnapshot().generation, generation);
+      const refresh = session.ensureLoaded(() => true);
+      await flushMicrotasks();
+      assert.deepEqual(session.getSnapshot().notes, optimistic);
+      if (fail) gate.reject(new Error("Expected note persistence failure"));
+      else gate.resolve();
+      await refresh;
+      await session.whenIdle();
+      assert.equal(session.getSnapshot().status, "ready");
+      assert.deepEqual(
+        session.getSnapshot().notes.map((row) => row.text),
+        repositoryRows.get(habitId)!.map((row) => row.text),
+      );
+      const survivingOriginal = session
+        .getSnapshot()
+        .notes.find((row) => row.id === original.id);
+      if (survivingOriginal) {
+        assert.equal(survivingOriginal.clientMutationId, originalKey);
+      }
+      if (!fail && command === "create") {
+        assert.equal(
+          session.getSnapshot().notes[1].clientMutationId,
+          submitted.clientMutationId,
+          "refresh must preserve a confirmed optimistic row's React key",
+        );
+        assert.ok(session.getSnapshot().notes[1].id < 0);
+      }
+      if (fail) {
+        const rollback = session
+          .getSnapshot()
+          .presentationChanges.find((change) => change.kind === "rollback");
+        assert.ok(rollback, "an external refresh must retain failed-command recovery");
+        assert.equal(rollback.source, command);
+        if (command !== "delete") {
+          assert.equal(
+            rollback.recoveryText,
+            command === "create" ? "New paragraph" : "Edited paragraph",
+          );
+        }
+        assert.equal(
+          session.getSnapshot().mutationError,
+          command === "delete" ? "delete" : "save",
+        );
+      }
+    }
+  }
+  // A new command can be admitted after the gateway cached a read result but
+  // before the session's final synchronous publication check.
+  existingHabits.add(526);
+  repositoryRows.set(526, [note(5261, 526)]);
+  const publicationToken = captureNotesCacheReadToken(526);
+  assert.equal(setCachedNotesIfCurrent(publicationToken, [note(5261, 526)]), true);
+  const publicationSession = application.getSession(526);
+  const publicationKey = publicationSession.getSnapshot().notes[0].clientMutationId;
+  application.invalidate(526);
+  const publicationLoad = publicationSession.ensureLoaded(() => true);
+  for (let turn = 0; turn < 40 && peekCachedNotes(526) == null; turn += 1) {
+    await Promise.resolve();
+  }
+  assert.notEqual(peekCachedNotes(526), null);
+  assert.equal(publicationSession.getSnapshot().status, "loading");
+  const publicationWrite = deferred<void>();
+  updateGates.push(publicationWrite);
+  assert.equal(publicationSession.update(5261, "Latest paragraph").accepted, true);
+  await flushMicrotasks();
+  assert.equal(publicationSession.getSnapshot().notes[0].text, "Latest paragraph");
+  publicationWrite.resolve();
+  await publicationLoad;
+  await publicationSession.whenIdle();
+  assert.equal(publicationSession.getSnapshot().notes[0].text, "Latest paragraph");
+  assert.equal(publicationSession.getSnapshot().notes[0].clientMutationId, publicationKey);
+  const predicateRows: Note[] = [
+    { ...note(5301, 530), isFailureReason: true },
+    { ...note(5302, 530), reasonType: "failure" },
+    { ...note(5303, 530), reasonType: "skipped" },
+    note(5304, 530),
+    { ...note(5305, 530), date: "2026-08-30", isFailureReason: true },
+  ];
+  existingHabits.add(530);
+  repositoryRows.set(530, predicateRows);
+  const predicateToken = captureNotesCacheReadToken(530);
+  assert.equal(setCachedNotesIfCurrent(predicateToken, predicateRows), true);
+  const predicateSession = application.getSession(530);
+  const ordinaryKey = predicateSession.getSnapshot().notes[3].clientMutationId;
+  const ordinaryWrite = deferred<void>();
+  updateGates.push(ordinaryWrite);
+  predicateSession.update(5304, "Personal paragraph");
+  await flushMicrotasks();
+  repositoryRows.set(530, [predicateRows[3], predicateRows[4]]);
+  application.invalidate(530, {
+    kind: "reason-notes-removed",
+    dates: ["2026-08-29"],
+  });
+  assert.deepEqual(
+    predicateSession.getSnapshot().notes.map((row) => row.id),
+    [5304, 5305],
+    "committed reason cleanup must apply both reason markers and only the removed dates",
+  );
+  assert.equal(predicateSession.getSnapshot().notes[0].text, "Personal paragraph");
+  assert.equal(predicateSession.getSnapshot().notes[0].clientMutationId, ordinaryKey);
+  const predicateReload = predicateSession.ensureLoaded(() => true);
+  ordinaryWrite.resolve();
+  await predicateReload;
+  await predicateSession.whenIdle();
+  assert.equal(predicateSession.getSnapshot().notes[0].text, "Personal paragraph");
+  assert.equal(predicateSession.getSnapshot().notes[0].clientMutationId, ordinaryKey);
+
+  const deletionRows = [note(5311, 531)];
+  existingHabits.add(531);
+  repositoryRows.set(531, deletionRows);
+  const deletionToken = captureNotesCacheReadToken(531);
+  assert.equal(setCachedNotesIfCurrent(deletionToken, deletionRows), true);
+  const deletionSession = application.getSession(531);
+  const deletionRead = deferred<Note[]>();
+  readGates.set(531, [deletionRead]);
+  const currentExistence = () => existingHabits.has(531);
+  application.invalidate(531);
+  const obsoleteDeletionLoad = deletionSession.ensureLoaded(currentExistence);
+  await flushMicrotasks();
+  application.invalidate(531);
+  void deletionSession.ensureLoaded(currentExistence);
+  existingHabits.delete(531);
+  repositoryRows.delete(531);
+  application.invalidate(531, { kind: "habit-deleted" });
+  assert.equal(deletionSession.getSnapshot().status, "missing");
+  assert.deepEqual(deletionSession.getSnapshot().notes, []);
+  deletionRead.resolve(deletionRows);
+  await obsoleteDeletionLoad;
+  await deletionSession.whenIdle();
+  assert.equal(deletionSession.getSnapshot().status, "missing");
+  assert.equal(getCachedNotes(531), null);
   const missingSession = application.getSession(999);
   await missingSession.ensureLoaded(() => null);
   assert.equal(missingSession.getSnapshot().status, "missing");
@@ -923,6 +1276,16 @@ async function main() {
     importedB.getSnapshot().notes.map((item) => item.id),
     [5119],
   );
+  const previousDatasetGeneration = importedA.getSnapshot().generation;
+  repositoryRows.set(510, [{ ...note(5109, 510), text: "Imported paragraph" }]);
+  clearCachedNotes();
+  assert.equal(importedA.getSnapshot().generation, previousDatasetGeneration + 1);
+  assert.equal(importedA.getSnapshot().habitExists, null);
+  assert.deepEqual(importedA.getSnapshot().notes, []);
+  await importedA.ensureLoaded(() => true);
+  assert.equal(importedA.getSnapshot().notes[0].id, 5109);
+  assert.equal(importedA.getSnapshot().notes[0].text, "Imported paragraph");
+  assert.deepEqual(importedA.getSnapshot().presentationChanges, []);
   const notesScreenSource = readFileSync(
     resolve(process.cwd(), "app/habit/[id]/notes.tsx"),
     "utf8",
@@ -1075,8 +1438,13 @@ async function main() {
   );
   assert.match(
     notesSessionSource,
-    /for \(;;\) \{[\s\S]{0,500}gateway\.load[\s\S]{0,350}!this\.gateway\.isLoadResultCurrent\(loaded\)[\s\S]{0,100}continue/,
+    /for \(;;\) \{[\s\S]{0,500}gateway\.load[\s\S]{0,350}const isCurrent = this\.gateway\.isLoadResultCurrent\(loaded\);[\s\S]{0,200}if \(!isCurrent\) \{[\s\S]{0,100}continue/,
     "the session must close the final promise gap before publishing a loaded snapshot",
+  );
+  assert.match(
+    notesScreenSource,
+    /const isLoading =\s*notesSnapshot\.habitExists == null &&\s*\(notesSnapshot\.status === "idle" \|\| notesSnapshot\.status === "loading"\)/,
+    "refreshing an existing projection must not replace its editors with a loading view",
   );
   assert.match(
     notesApplicationSource,
@@ -1304,7 +1672,11 @@ async function main() {
     /readConsistentDataTransferSnapshot[\s\S]{0,160}dataTransferCoordinator\.readExportSnapshot/,
     "the composition boundary must delegate the snapshot protocol to the application coordinator",
   );
+  await auditExternalNotesWrites();
   clearCachedNotes();
   console.log("Notes cache audit passed.");
 }
-void main();
+const auditDeadline = setTimeout(() => {
+  throw new Error("Notes cache audit did not settle");
+}, 30_000);
+void main().finally(() => clearTimeout(auditDeadline));

@@ -2149,6 +2149,12 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
       if (result.kind === "updated") {
         persistedHabit = result.habit;
         removedRecordDates = new Set(result.removedRecordDates);
+        if (removedRecordDates.size > 0) {
+          invalidateNotesProjection(id, {
+            kind: "reason-notes-removed",
+            dates: result.removedRecordDates,
+          });
+        }
       }
     } catch (error) {
       if (error instanceof StaleHabitScheduleMutationError) {
@@ -3062,6 +3068,9 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
     try {
       const deletedIdList = [...deletedIds];
       await habitPersistence.deleteHabits(deletedIdList);
+      for (const id of deletedIds) {
+        invalidateNotesProjection(id, { kind: "habit-deleted" });
+      }
       publishDeletedHabitDescriptionLines(deletedIds);
       clearDayRecordOverlaysForHabits(deletedIds);
       for (const [key, mutationId] of invalidatedDayMutations) {
@@ -3329,6 +3338,7 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
         reason: reasonText ?? undefined,
         now: nowTs,
       });
+      if (reasonText != null) invalidateNotesProjection(habitId);
       if (!isLatestDayMutation(overlayKey, mutationId)) return true;
       invalidatePendingDayRecordReads();
       dayRecordOverlays.set(overlayKey, persisted);

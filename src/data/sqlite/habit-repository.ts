@@ -160,6 +160,53 @@ async function readDayRecordsForHabitOrderedByDate(
   return rows.map(mapRawDayRecordRow);
 }
 
+async function readMaxDisplayOrder(
+  executor: AsyncDatabaseExecutor,
+): Promise<number | null> {
+  const row = await executor.getFirst<{ value: number | null }>(
+    "SELECT MAX(display_order) AS value FROM habits",
+  );
+  return row?.value ?? null;
+}
+
+async function insertHabit(
+  executor: AsyncDatabaseExecutor,
+  habit: NewPersistedHabit,
+): Promise<Habit> {
+  assertValidDisplayOrder(habit.displayOrder);
+  const { repeatType, repeatConfig } = fromRepeatSchedule(
+    habit.repeatSchedule,
+    habit.scheduleHistory,
+  );
+  const rawRow = await executor.getFirst<RawHabitDatabaseRow>(
+    `INSERT INTO habits (
+       name, description, description_visible, repeat_type, repeat_config,
+       start_date, reminder_enabled, reminder_time, display_order,
+       is_archived, archived_at, archive_history, created_at, updated_at
+     ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+     WHERE ${generatedIdCapacitySql("habits")}
+     RETURNING ${HABIT_COLUMNS}`,
+    [
+      habit.name,
+      habit.description,
+      habit.descriptionVisible ? 1 : 0,
+      repeatType,
+      JSON.stringify(repeatConfig),
+      habit.startDate,
+      habit.reminderEnabled ? 1 : 0,
+      habit.reminderTime,
+      habit.displayOrder,
+      habit.isArchived ? 1 : 0,
+      habit.archivedAt,
+      JSON.stringify(habit.archiveHistory),
+      habit.createdAt,
+      habit.updatedAt,
+    ],
+  );
+  if (!rawRow) throw new Error("Habit insert returned no row");
+  return mapRawHabitRow(rawRow);
+}
+
 async function patchHabit(
   executor: AsyncDatabaseExecutor,
   habitId: number,
@@ -234,6 +281,8 @@ function createSqliteHabitSession(
   executor: AsyncDatabaseExecutor,
 ): HabitPersistenceSession {
   return {
+    readMaxDisplayOrder: () => readMaxDisplayOrder(executor),
+    insertHabit: (habit) => insertHabit(executor, habit),
     readHabit: (habitId) => readHabit(executor, habitId),
     readDayRecordsForHabitOrderedByDate: (habitId) =>
       readDayRecordsForHabitOrderedByDate(executor, habitId),
@@ -339,46 +388,6 @@ export const sqliteHabitRepository: HabitPersistenceRepository = {
       [startDate, endDate],
     );
     return rows.map(mapRawDayRecordRow);
-  },
-  async readMaxDisplayOrder() {
-    const row = await runtimeDb.getFirst<{ value: number | null }>(
-      "SELECT MAX(display_order) AS value FROM habits",
-    );
-    return row?.value ?? null;
-  },
-  async insertHabit(habit: NewPersistedHabit) {
-    assertValidDisplayOrder(habit.displayOrder);
-    const { repeatType, repeatConfig } = fromRepeatSchedule(
-      habit.repeatSchedule,
-      habit.scheduleHistory,
-    );
-    const rawRow = await runtimeDb.getFirst<RawHabitDatabaseRow>(
-      `INSERT INTO habits (
-         name, description, description_visible, repeat_type, repeat_config,
-         start_date, reminder_enabled, reminder_time, display_order,
-         is_archived, archived_at, archive_history, created_at, updated_at
-       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-       WHERE ${generatedIdCapacitySql("habits")}
-       RETURNING ${HABIT_COLUMNS}`,
-      [
-        habit.name,
-        habit.description,
-        habit.descriptionVisible ? 1 : 0,
-        repeatType,
-        JSON.stringify(repeatConfig),
-        habit.startDate,
-        habit.reminderEnabled ? 1 : 0,
-        habit.reminderTime,
-        habit.displayOrder,
-        habit.isArchived ? 1 : 0,
-        habit.archivedAt,
-        JSON.stringify(habit.archiveHistory),
-        habit.createdAt,
-        habit.updatedAt,
-      ],
-    );
-    if (!rawRow) throw new Error("Habit insert returned no row");
-    return mapRawHabitRow(rawRow);
   },
   async deleteDayRecord(habitId, date) {
     await runtimeDb.run(

@@ -1,4 +1,5 @@
 import type { Note } from "@/types/note";
+import type { NotesExternalChange } from "@/application/notes/notes-session";
 
 const MAX_CACHED_HABITS = 48;
 const notesByHabitId = new Map<number, readonly Note[]>();
@@ -19,6 +20,7 @@ export interface NotesCacheInvalidation {
   /** `null` means every habit after an authoritative dataset replacement. */
   readonly habitId: number | null;
   readonly epoch: number;
+  readonly change?: NotesExternalChange;
 }
 
 const cacheInvalidationListeners = new Set<
@@ -317,10 +319,13 @@ export async function waitForPendingNotesWrites(habitId: number): Promise<void> 
   }
 }
 
-export function invalidateCachedNotes(habitId: number): void {
+export function invalidateCachedNotes(
+  habitId: number,
+  change?: NotesExternalChange,
+): void {
   notesByHabitId.delete(habitId);
   generationByHabitId.delete(habitId);
-  const invalidation = { habitId, epoch: cacheEpoch } as const;
+  const invalidation = { habitId, epoch: cacheEpoch, change } as const;
   for (const listener of [...cacheInvalidationListeners]) {
     listener(invalidation);
   }

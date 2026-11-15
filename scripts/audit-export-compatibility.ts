@@ -546,12 +546,16 @@ const migrationRegistry = readFileSync(
 );
 const migrationJournal = JSON.parse(
   readFileSync(resolve(root, "drizzle/meta/_journal.json"), "utf8")
-) as { entries: { idx: number; when: number }[] };
+) as { entries: { idx: number; when: number; tag: string }[] };
 assert.match(migrationSource, /`reason_type` text/);
 assert.match(migrationSource, /`archive_history` text DEFAULT '\[\]' NOT NULL/);
 assert.doesNotMatch(migrationSource, /ALTER TABLE|UPDATE `habits`|DELETE FROM/);
-assert.deepEqual(migrationJournal.entries.length, 1);
-assert.doesNotMatch(migrationRegistry, /m0001|m0002/);
+assert.ok(migrationJournal.entries.some((entry) => entry.tag === "0001_habit_display_order"));
+for (const entry of migrationJournal.entries) {
+  assert.ok(migrationRegistry.includes(`from './${entry.tag}.sql'`),
+    "every journal migration must be imported by the native registry");
+  assert.match(migrationRegistry, new RegExp(`\\bm${String(entry.idx).padStart(4, "0")}\\b`));
+}
 const legacyLastMigrationTimestamp = 1784800000000;
 for (const entry of migrationJournal.entries.slice(1)) {
   assert.ok(

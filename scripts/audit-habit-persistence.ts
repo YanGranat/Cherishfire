@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { drizzle } from "drizzle-orm/expo-sqlite/driver";
+import { migrate } from "drizzle-orm/expo-sqlite/migrator";
 
 import {
   createHabitPersistenceApplication,
@@ -399,9 +402,17 @@ async function assertOtherPersistenceProtocols() {
   ).createHabit({ habit: newHabit, resolveDisplayOrderFromStorage: true });
   assert.equal(created.displayOrder, 8);
   assert.deepEqual(createRepository.operations, [
+    "transaction.begin",
     "readMaxDisplayOrder",
     "insertHabit",
+    "transaction.commit",
   ]);
+  createRepository.operations = [];
+  const explicitlyOrdered = await createHabitPersistenceApplication(createRepository)
+    .createHabit({ habit: { ...newHabit, displayOrder: 12 }, resolveDisplayOrderFromStorage: false });
+  assert.equal(explicitlyOrdered.displayOrder, 12);
+  assert.deepEqual(createRepository.operations, ["insertHabit"],
+    "a complete in-memory order must retain the single-insert path");
 
   const reorderFixture = HABIT_PERSISTENCE_EQUIVALENCE_FIXTURES.reorder;
   const reorderRepository = new FakeHabitRepository([
@@ -1015,14 +1026,235 @@ async function assertSqliteIntegerCapacity(): Promise<void> {
   let unsafeInsertCalls = 0;
   const domain = createHabitPersistenceApplication({
     ...fixture.habits,
-    readMaxDisplayOrder: async () => Number.MAX_SAFE_INTEGER,
-    insertHabit: async (habit) => {
-      unsafeInsertCalls += 1;
-      return createHabitFixture(habit);
+    transaction: async (task) => {
+      return task({
+        ...fixture.habits,
+        readMaxDisplayOrder: async () => Number.MAX_SAFE_INTEGER,
+        insertHabit: async (habit) => {
+          unsafeInsertCalls += 1;
+          return createHabitFixture(habit);
+        },
+      });
     },
   });
   await assert.rejects(domain.createHabit({ habit: newHabit, resolveDisplayOrderFromStorage: true }), /display order/);
   assert.equal(unsafeInsertCalls, 0, "the application must not submit an unsafe computed order to its repository port");
+}
+
+async function assertConcurrentSqliteCreation(): Promise<void> {
+  for (const existing of [false, true]) {
+    const fixture = loadSqliteRepositoriesForAudit();
+    const application = createHabitPersistenceApplication(fixture.habits);
+    const { id: _fixtureId, ...newHabit } = createHabitFixture({ name: "Practice" });
+    try {
+      if (existing) {
+        await application.createHabit({
+          habit: { ...newHabit, name: "Active", displayOrder: 2 },
+          resolveDisplayOrderFromStorage: false,
+        });
+        const archived = await application.createHabit({
+          habit: { ...newHabit, name: "Archived", displayOrder: 7 },
+          resolveDisplayOrderFromStorage: false,
+        });
+        await application.archiveHabit(archived.id, FIXED_NOW_MS);
+      }
+      const firstOrder = existing ? 8 : 0;
+      const created = await Promise.all(Array.from({ length: 8 }, (_, index) =>
+        application.createHabit({
+          habit: { ...newHabit, name: `Practice ${index + 1}`, displayOrder: index },
+          resolveDisplayOrderFromStorage: true,
+        }),
+      ));
+      assert.deepEqual(
+        created.map((habit) => habit.displayOrder),
+        Array.from({ length: created.length }, (_, index) => firstOrder + index),
+        "concurrent allocation must use the order committed by the preceding insertion",
+      );
+      const snapshot = await fixture.transfers.readConsistentSnapshot();
+      if (existing) {
+        assert.equal(snapshot.habits.find((habit) => habit.name === "Active")?.displayOrder, 2);
+        assert.equal(snapshot.habits.find((habit) => habit.name === "Archived")?.displayOrder, 7,
+          "allocation must retain occupied archived positions and sparse existing order");
+      }
+      const restored = normalizeImportData(buildExportJsonFromRows({
+        ...snapshot, exportedAt: new Date(FIXED_NOW_MS).toISOString(),
+      }));
+      await fixture.transfers.replaceAndVerify(restored, (rows) => verifyRestoredImportRows(restored, rows));
+      assert.deepEqual(
+        (await fixture.habits.readAllHabits()).map(({ id, displayOrder }) => ({ id, displayOrder })),
+        snapshot.habits.map(({ id, displayOrder }) => ({ id, displayOrder })),
+        "an export/import round trip must retain every allocated identity and order",
+      );
+
+      fixture.database.exec("CREATE TRIGGER reject_habit_insert BEFORE INSERT ON habits BEGIN SELECT RAISE(ABORT, 'Rejected insertion'); END");
+      const beforeFailure = JSON.stringify(await fixture.transfers.readConsistentSnapshot());
+      const sequenceBefore = fixture.database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'habits'").get()?.seq;
+      await assert.rejects(application.createHabit({ habit: newHabit, resolveDisplayOrderFromStorage: true }), /Rejected insertion/);
+      assert.equal(JSON.stringify(await fixture.transfers.readConsistentSnapshot()), beforeFailure);
+      assert.equal(fixture.database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'habits'").get()?.seq, sequenceBefore,
+        "failed allocation must leave the habit identity counter unchanged");
+      fixture.database.exec("DROP TRIGGER reject_habit_insert");
+      assert.equal(
+        (await application.createHabit({ habit: newHabit, resolveDisplayOrderFromStorage: true })).displayOrder,
+        firstOrder + created.length,
+        "a rejected insertion must not reserve an unused display position",
+      );
+    } finally {
+      await fixture.runtime.whenIdle();
+      fixture.database.close();
+    }
+  }
+}
+
+async function assertDisplayOrderMigration(): Promise<void> {
+  const migration = readFileSync(resolve("drizzle/0001_habit_display_order.sql"), "utf8");
+  const cases = [
+    [], [0], [12, 2, 7], [Number.MAX_SAFE_INTEGER - 2, Number.MAX_SAFE_INTEGER],
+    [0, 0], [0, 0, 9], [7, 2, 2, 0, 9], [2, 2, 2, 7],
+    [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+  ];
+  for (const orders of cases) {
+    const fixture = loadSqliteRepositoriesForAudit();
+    const application = createHabitPersistenceApplication(fixture.habits);
+    const { id: _fixtureId, ...newHabit } = createHabitFixture({ name: "Practice" });
+    const relatedRows = () => JSON.stringify({
+      records: fixture.database.prepare("SELECT * FROM day_records ORDER BY id").all(),
+      notes: fixture.database.prepare("SELECT * FROM notes ORDER BY id").all(),
+      settings: fixture.database.prepare("SELECT * FROM settings ORDER BY key").all(),
+      sequences: fixture.database.prepare("SELECT * FROM sqlite_sequence ORDER BY name").all(),
+    });
+    try {
+      fixture.database.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run("theme", JSON.stringify("light"));
+      for (const [index, displayOrder] of orders.entries()) {
+        const created = await application.createHabit({
+          habit: { ...newHabit, name: `Practice ${index + 1}`, displayOrder },
+          resolveDisplayOrderFromStorage: false,
+        });
+        if (index % 2 === 1) await application.archiveHabit(created.id, FIXED_NOW_MS);
+        await application.markDay({ habitId: created.id, date: FIXED_TODAY, status: "done", now: FIXED_NOW_MS });
+        await fixture.notes.createNote({
+          habitId: created.id, date: FIXED_TODAY, text: "Practice note", isFailureReason: false,
+          reasonType: null, createdAt: FIXED_NOW_MS, updatedAt: FIXED_NOW_MS,
+        });
+      }
+      const before = await fixture.habits.readAllHabits();
+      const relatedBefore = relatedRows();
+      const duplicated = new Set(orders).size !== orders.length;
+      const projectWithoutOrder = (rows: Habit[]) => rows.map(({ displayOrder: _order, ...habit }) => habit);
+      const checkResult = async () => {
+        const after = await fixture.habits.readAllHabits();
+        assert.deepEqual(projectWithoutOrder(after), projectWithoutOrder(before),
+          "order repair must preserve full row identity, relative ordering, archive history and timestamps");
+        assert.deepEqual(after.map((habit) => habit.displayOrder), duplicated
+          ? orders.map((_, index) => index)
+          : before.map((habit) => habit.displayOrder),
+        "only a duplicate dataset may receive new display positions");
+        assert.equal(relatedRows(), relatedBefore, "order repair must not change related rows or identity counters");
+        normalizeImportData(buildExportJsonFromRows({
+          ...await fixture.transfers.readConsistentSnapshot(), exportedAt: new Date(FIXED_NOW_MS).toISOString(),
+        }));
+      };
+      fixture.database.exec("BEGIN");
+      fixture.database.exec(migration);
+      fixture.database.exec("ROLLBACK");
+      assert.deepEqual(await fixture.habits.readAllHabits(), before,
+        "a rolled-back repair must restore all original display positions");
+      assert.equal(relatedRows(), relatedBefore);
+      if (duplicated) {
+        fixture.database.exec("CREATE TRIGGER reject_order_repair BEFORE UPDATE OF display_order ON habits WHEN NEW.id = 2 BEGIN SELECT RAISE(ABORT, 'Rejected order repair'); END");
+        assert.throws(() => fixture.database.exec(migration), /Rejected order repair/);
+        assert.deepEqual(await fixture.habits.readAllHabits(), before,
+          "a repair failure must not leave preceding rows partly renumbered");
+        assert.equal(relatedRows(), relatedBefore);
+        fixture.database.exec("DROP TRIGGER reject_order_repair");
+      }
+      fixture.database.exec("BEGIN");
+      fixture.database.exec(migration);
+      fixture.database.exec("COMMIT");
+      await checkResult();
+      fixture.database.exec(migration);
+      await checkResult();
+    } finally {
+      await fixture.runtime.whenIdle();
+      fixture.database.close();
+    }
+  }
+}
+
+async function assertNativeMigrationJournal(): Promise<void> {
+  const journal = JSON.parse(readFileSync(resolve("drizzle/meta/_journal.json"), "utf8")) as {
+    entries: { idx: number; when: number; tag: string; breakpoints: boolean }[];
+  };
+  const bundled = {
+    journal,
+    migrations: Object.fromEntries(journal.entries.map((entry) => [
+      `m${String(entry.idx).padStart(4, "0")}`,
+      readFileSync(resolve(`drizzle/${entry.tag}.sql`), "utf8"),
+    ])),
+  };
+  const migrationDb = (database: DatabaseSync) => drizzle({
+    prepareSync(sql: string) {
+      const statement = database.prepare(sql);
+      return {
+        executeSync(params: SQLInputValue[]) {
+          const result = statement.run(...params);
+          return { changes: Number(result.changes), lastInsertRowId: Number(result.lastInsertRowid) };
+        },
+        executeForRawResultSync(params: SQLInputValue[]) {
+          return { getAllSync: () => statement.all(...params).map((row) => Object.values(row)) };
+        },
+      };
+    },
+  } as unknown as Parameters<typeof drizzle>[0]);
+  const fresh = new DatabaseSync(":memory:");
+  try {
+    await migrate(migrationDb(fresh), bundled);
+    assert.deepEqual(
+      fresh.prepare("SELECT created_at FROM __drizzle_migrations ORDER BY created_at").all().map((row) => row.created_at),
+      journal.entries.map((entry) => entry.when),
+      "a fresh native migration run must install and acknowledge every bundled migration",
+    );
+  } finally {
+    fresh.close();
+  }
+
+  for (const watermark of [journal.entries[0].when, 1784800000000]) {
+    const fixture = loadSqliteRepositoriesForAudit();
+    const application = createHabitPersistenceApplication(fixture.habits);
+    const { id: _fixtureId, ...newHabit } = createHabitFixture({ name: "Practice" });
+    const db = migrationDb(fixture.database);
+    try {
+      await application.createHabit({ habit: newHabit, resolveDisplayOrderFromStorage: false });
+      await application.createHabit({ habit: newHabit, resolveDisplayOrderFromStorage: false });
+      fixture.database.exec("CREATE TABLE __drizzle_migrations (id SERIAL PRIMARY KEY, hash TEXT NOT NULL, created_at NUMERIC)");
+      fixture.database.prepare("INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)").run("baseline", watermark);
+      const before = await fixture.habits.readAllHabits();
+      fixture.database.exec("CREATE TRIGGER reject_native_order_repair BEFORE UPDATE OF display_order ON habits WHEN NEW.id = 2 BEGIN SELECT RAISE(ABORT, 'Rejected native order repair'); END");
+      await assert.rejects(migrate(db, bundled), (error: unknown) =>
+        error instanceof Error && error.cause instanceof Error && /Rejected native order repair/.test(error.cause.message),
+        "a pending repair must execute before its marker is acknowledged",
+      );
+      assert.deepEqual(await fixture.habits.readAllHabits(), before,
+        "failed native migration must roll back every modified habit");
+      assert.deepEqual(fixture.database.prepare("SELECT hash, created_at FROM __drizzle_migrations").all().map((row) => ({ ...row })), [
+        { hash: "baseline", created_at: watermark },
+      ], "failed native migration must not acknowledge its journal marker");
+      fixture.database.exec("DROP TRIGGER reject_native_order_repair");
+      await migrate(db, bundled);
+      assert.deepEqual((await fixture.habits.readAllHabits()).map((habit) => habit.displayOrder), [0, 1],
+        "the repair marker must sort after every supported database watermark");
+      const markers = fixture.database.prepare("SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at").all();
+      assert.deepEqual(markers.map((row) => row.created_at), [watermark, journal.entries.at(-1)!.when]);
+      const repaired = await fixture.habits.readAllHabits();
+      await migrate(db, bundled);
+      assert.deepEqual(await fixture.habits.readAllHabits(), repaired);
+      assert.deepEqual(fixture.database.prepare("SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at").all(), markers,
+        "a completed data repair must not execute or acknowledge again");
+    } finally {
+      await fixture.runtime.whenIdle();
+      fixture.database.close();
+    }
+  }
 }
 
 async function assertSqliteReplacementIdentityLifetime(): Promise<void> {
@@ -1122,6 +1354,9 @@ async function main() {
   await assertExactCutoffFence();
   await assertDelayedHabitFenceAdmission();
   await assertSqliteIntegerCapacity();
+  await assertConcurrentSqliteCreation();
+  await assertDisplayOrderMigration();
+  await assertNativeMigrationJournal();
   await assertSqliteReplacementIdentityLifetime();
   await assertLargeSqliteDeletesAreChunked();
   assertOutOfOrderEditablePatchOwnership();

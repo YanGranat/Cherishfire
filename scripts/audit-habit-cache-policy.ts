@@ -811,7 +811,7 @@ assert.match(
 const rangedRecordsRead = sourceSlice(
   habitRepositorySource,
   "async readDayRecordsInDateRange(startDate, endDate)",
-  "async readMaxDisplayOrder()",
+  "async deleteDayRecord(habitId, date)",
 );
 assert.match(
   rangedRecordsRead,

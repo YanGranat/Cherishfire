@@ -10,6 +10,9 @@ let nextOptimisticNoteId = -1;
 let nextClientMutationSequence = 0;
 
 export type NotesMutationErrorKind = "save" | "delete";
+export type NotesExternalChange =
+  | { readonly kind: "reason-notes-removed"; readonly dates: readonly string[] }
+  | { readonly kind: "habit-deleted" };
 export type NotesSessionStatus =
   | "idle"
   | "loading"
@@ -183,16 +186,44 @@ class NotesSessionImpl implements NotesSession {
     };
   }
 
-  invalidateAuthoritativeProjection(): void {
-    this.generation += 1;
-    this.entitiesByUiId.clear();
-    this.publish({
-      status: "idle",
-      habitExists: null,
-      notes: [],
-      mutationError: null,
-      presentationChanges: [],
-    });
+  invalidateAuthoritativeProjection(
+    resetDataset = false,
+    change?: NotesExternalChange,
+  ): void {
+    if (resetDataset || change?.kind === "habit-deleted") {
+      this.generation += 1;
+      this.entitiesByUiId.clear();
+      if (change?.kind === "habit-deleted") this.reloadAfterCurrentLoad = null;
+      this.publish({
+        status: change?.kind === "habit-deleted" ? "missing" : "idle",
+        habitExists: change?.kind === "habit-deleted" ? false : null,
+        notes: [],
+        mutationError: null,
+        presentationChanges: [],
+      });
+      return;
+    }
+    // A refresh of the same habit does not revoke accepted note commands or
+    // replace the identity of an editor that is still mounted.
+    if (change?.kind === "reason-notes-removed") {
+      const dates = new Set(change.dates);
+      const wasRemoved = (note: Note) =>
+        dates.has(note.date) &&
+        (note.isFailureReason ||
+          note.reasonType === "failure" ||
+          note.reasonType === "skipped");
+      for (const [id, entity] of this.entitiesByUiId) {
+        if (entity.confirmed != null && wasRemoved(entity.confirmed)) {
+          this.entitiesByUiId.delete(id);
+        }
+      }
+      this.publish({
+        status: "idle",
+        notes: this.snapshot.notes.filter((note) => !wasRemoved(note)),
+      });
+      return;
+    }
+    this.publish({ status: "idle" });
   }
 
   ensureLoaded(getKnownHabitExists: () => boolean | null): Promise<void> {
@@ -498,7 +529,6 @@ class NotesSessionImpl implements NotesSession {
     const capturedGeneration = this.generation;
     this.publish({
       status: "loading",
-      mutationError: null,
     });
     let request!: Promise<void>;
     request = (async () => {
@@ -508,10 +538,11 @@ class NotesSessionImpl implements NotesSession {
             this.habitId,
             getKnownHabitExists,
           );
+          const isCurrent = this.gateway.isLoadResultCurrent(loaded);
           if (capturedGeneration !== this.generation) {
             return;
           }
-          if (!this.gateway.isLoadResultCurrent(loaded)) {
+          if (!isCurrent) {
             continue;
           }
           const notes = loaded.habitExists
@@ -521,7 +552,6 @@ class NotesSessionImpl implements NotesSession {
             status: loaded.habitExists ? "ready" : "missing",
             habitExists: loaded.habitExists,
             notes,
-            mutationError: null,
           });
           return;
         }
@@ -696,9 +726,27 @@ class NotesSessionImpl implements NotesSession {
     notes: readonly Note[],
   ): readonly NotesSessionNote[] {
     const replace = () => {
+      const previousByPersistedId = new Map(
+        [...this.entitiesByUiId.values()]
+          .filter((entity) => entity.persistedId != null)
+          .map((entity) => [entity.persistedId!, entity]),
+      );
       this.entitiesByUiId.clear();
       this.nextOrderOrdinal = 0;
       return notes.map((note) => {
+        const existing = previousByPersistedId.get(note.id);
+        if (existing) {
+          const entity: NoteEntityState = {
+            ...existing,
+            orderOrdinal: this.nextOrderOrdinal++,
+            confirmed: { ...note },
+            latestIntent: "confirmed",
+            latestWrite: null,
+            persistenceTail: null,
+          };
+          this.entitiesByUiId.set(entity.uiId, entity);
+          return createDisplayedNote(note, entity.uiId, entity.clientMutationId);
+        }
         const clientMutationId = createPersistedClientMutationId(
           this.habitId,
           note.id,
@@ -799,7 +847,7 @@ class NotesSessionImpl implements NotesSession {
 
 export interface NotesSessionRegistry {
   get(habitId: number): NotesSession;
-  invalidate(habitId: number | null): void;
+  invalidate(habitId: number | null, change?: NotesExternalChange): void;
   getResourceCounts(): Record<string, number>;
 }
 
@@ -858,16 +906,16 @@ export function createNotesSessionRegistry(
       trim(session);
       return session;
     },
-    invalidate(habitId) {
+    invalidate(habitId, change) {
       if (habitId == null) {
         // `invalidateAuthoritativeProjection` publishes and therefore touches
         // the LRU Map. Never iterate that live Map while its entries are being
         // deleted/reinserted by `onActivity`.
         for (const session of [...sessions.values()]) {
-          session.invalidateAuthoritativeProjection();
+          session.invalidateAuthoritativeProjection(true);
         }
       } else {
-        sessions.get(habitId)?.invalidateAuthoritativeProjection();
+        sessions.get(habitId)?.invalidateAuthoritativeProjection(false, change);
       }
       trim();
     },

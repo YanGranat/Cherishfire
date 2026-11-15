@@ -3,6 +3,7 @@ import Module from "node:module";
 import { dirname, resolve } from "node:path";
 import ts from "typescript";
 import type { HabitPersistenceApplication } from "../../src/application/habits/habit-persistence";
+import type { NotesApplication } from "../../src/application/notes/notes-application";
 import { startArchivePeriod } from "../../src/domain/habits/archive-periods";
 import { planHabitScheduleEdit } from "../../src/domain/habits/schedule-edit";
 import type { DayRecord, Habit } from "../../src/types/habit";
@@ -54,6 +55,7 @@ interface CommonJsModuleConstructor {
 export interface HabitStoreAuditSourceOptions {
   transform?: (source: string) => string;
   waitForCommitOpportunity?: () => Promise<void>;
+  notesProjection?: Pick<NotesApplication, "invalidate" | "invalidateAll">;
 }
 
 export interface HabitStoreAuditDataset {
@@ -450,8 +452,10 @@ function compileHabitStoreModule(
     [
       "@/composition/notes",
       {
-        invalidateAllNotesProjections: noOperation,
-        invalidateNotesProjection: noOperation,
+        invalidateAllNotesProjections:
+          options.notesProjection?.invalidateAll ?? noOperation,
+        invalidateNotesProjection:
+          options.notesProjection?.invalidate ?? noOperation,
       },
     ],
   ]);

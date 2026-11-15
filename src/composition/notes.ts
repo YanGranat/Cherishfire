@@ -1,6 +1,7 @@
 import { createNotesApplication } from "@/application/notes/notes-application";
 import { persistenceCommitScheduler } from "@/composition/persistence";
 import { sqliteNoteRepository } from "@/data/sqlite/note-repository";
+import type { NotesExternalChange } from "@/application/notes/notes-session";
 
 export type {
   NotesPresentationChange,
@@ -14,8 +15,11 @@ export const notesApplication = createNotesApplication(sqliteNoteRepository, {
   now: () => new Date(),
 });
 
-export const invalidateNotesProjection = (habitId: number): void => {
-  notesApplication.invalidate(habitId);
+export const invalidateNotesProjection = (
+  habitId: number,
+  change?: NotesExternalChange,
+): void => {
+  notesApplication.invalidate(habitId, change);
 };
 
 export const invalidateAllNotesProjections = (): void => {

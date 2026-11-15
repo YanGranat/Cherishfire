@@ -190,7 +190,8 @@ function NotesScreen({ habitId }: { habitId: number }) {
   const noteList = notesSnapshot.notes;
   const habitExists = notesSnapshot.habitExists;
   const isLoading =
-    notesSnapshot.status === "idle" || notesSnapshot.status === "loading";
+    notesSnapshot.habitExists == null &&
+    (notesSnapshot.status === "idle" || notesSnapshot.status === "loading");
   const loadError =
     notesSnapshot.status === "load-error" ? t("notes.loadError") : null;
   const mutationError =

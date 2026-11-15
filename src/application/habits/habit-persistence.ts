@@ -59,6 +59,8 @@ export interface PersistedReasonNote {
  * SQLite row, or transaction object to application/state code.
  */
 export interface HabitPersistenceSession {
+  readMaxDisplayOrder(): Promise<number | null>;
+  insertHabit(habit: NewPersistedHabit): Promise<Habit>;
   readHabit(habitId: number): Promise<Habit | null>;
   readDayRecordsForHabitOrderedByDate(
     habitId: number,
@@ -98,8 +100,6 @@ export interface HabitPersistenceRepository
     startDate: string,
     endDate: string,
   ): Promise<DayRecord[]>;
-  readMaxDisplayOrder(): Promise<number | null>;
-  insertHabit(habit: NewPersistedHabit): Promise<Habit>;
   deleteDayRecord(habitId: number, date: string): Promise<void>;
 }
 
@@ -208,11 +208,15 @@ export function createHabitPersistenceApplication(
       repository.readDayRecordsInDateRange(startDate, endDate),
 
     async createHabit({ habit, resolveDisplayOrderFromStorage }) {
-      const displayOrder = resolveDisplayOrderFromStorage
-        ? ((await repository.readMaxDisplayOrder()) ?? -1) + 1
-        : habit.displayOrder;
-      assertValidDisplayOrder(displayOrder);
-      return repository.insertHabit({ ...habit, displayOrder });
+      if (resolveDisplayOrderFromStorage) {
+        return repository.transaction(async (session) => {
+          const displayOrder = ((await session.readMaxDisplayOrder()) ?? -1) + 1;
+          assertValidDisplayOrder(displayOrder);
+          return session.insertHabit({ ...habit, displayOrder });
+        });
+      }
+      assertValidDisplayOrder(habit.displayOrder);
+      return repository.insertHabit(habit);
     },
 
     patchHabit: (habitId, patch) => repository.patchHabit(habitId, patch),

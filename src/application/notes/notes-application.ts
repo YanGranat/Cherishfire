@@ -22,6 +22,7 @@ import type {
 } from "@/application/notes/note-repository";
 import {
   createNotesSessionRegistry,
+  type NotesExternalChange,
   type NotesLoadResult,
   type NotesSession,
   type NotesSessionGateway,
@@ -37,7 +38,7 @@ export interface NotesApplication {
   /** One application-owned optimistic projection per real habit. */
   getSession(habitId: number): NotesSession;
   prewarm(habitId: number): Promise<void>;
-  invalidate(habitId: number): void;
+  invalidate(habitId: number, change?: NotesExternalChange): void;
   invalidateAll(): void;
   getResourceCounts(): Record<string, number>;
 }
@@ -126,8 +127,8 @@ export function createNotesApplication(
   // Explicit invalidation means an authoritative source outside the Notes
   // session changed (habit schedule/delete or committed import). Successful
   // Notes commands update their own projection and therefore do not emit it.
-  subscribeToNotesCacheInvalidation(({ habitId }) => {
-    sessions.invalidate(habitId);
+  subscribeToNotesCacheInvalidation(({ habitId, change }) => {
+    sessions.invalidate(habitId, change);
   });
 
   const prewarm = async (habitId: number): Promise<void> => {

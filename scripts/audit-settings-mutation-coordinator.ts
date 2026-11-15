@@ -1191,7 +1191,7 @@ function auditOwnership(): void {
   assert.doesNotMatch(inlineDescription, /@\/data\/|@\/db\/|runtimeDb/);
   assert.match(
     habitStore,
-    /await habitPersistence\.deleteHabits\(deletedIdList\);[\s\S]{0,100}publishDeletedHabitDescriptionLines\(deletedIds\);/,
+    /await habitPersistence\.deleteHabits\(deletedIdList\);[\s\S]{0,100}invalidateNotesProjection\(id, \{ kind: "habit-deleted" \}\);[\s\S]{0,100}publishDeletedHabitDescriptionLines\(deletedIds\);/,
     "habit deletion must publish cache cleanup only after its atomic row deletion commits",
   );
   assert.match(

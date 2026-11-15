@@ -399,6 +399,8 @@ function createReminderServiceHarness(options?: {
   let snapshotReadCount = 0;
   let snapshotReadFailures = 0;
   let cancellationFailures = 0;
+  let scheduledListReadFailures = 0;
+  let scheduledReadBarrier: { wait: Promise<void>; started(): void } | null = null;
   let schedulingFailures = 0;
   let schedulingFailureAfter: number | null = null;
   let records: { habitId: number; date: string; status: string }[] = [];
@@ -464,6 +466,16 @@ function createReminderServiceHarness(options?: {
     },
     async listScheduledHabitReminders() {
       scheduledListReadCount += 1;
+      const barrier = scheduledReadBarrier;
+      scheduledReadBarrier = null;
+      if (barrier) {
+        barrier.started();
+        await barrier.wait;
+      }
+      if (scheduledListReadFailures > 0) {
+        scheduledListReadFailures -= 1;
+        throw new Error("expected pending-list read failure");
+      }
       if (options?.preserveScheduledState) {
         return new Map(
           [...nativeScheduledByHabit.entries()].map(([habitId, reminders]) => [
@@ -584,6 +596,22 @@ function createReminderServiceHarness(options?: {
     },
     failCancellations(count = 1) {
       cancellationFailures = count;
+    },
+    failScheduledListReads(count = 1) {
+      scheduledListReadFailures = count;
+    },
+    holdNextScheduledListRead() {
+      let release!: () => void;
+      let started!: () => void;
+      const wait = new Promise<void>((resolve) => { release = resolve; });
+      const observed = new Promise<void>((resolve) => { started = resolve; });
+      scheduledReadBarrier = { wait, started };
+      return { started: observed, release };
+    },
+    deliverReminder(identifier: string) {
+      for (const [habitId, reminders] of nativeScheduledByHabit) {
+        nativeScheduledByHabit.set(habitId, reminders.filter((reminder) => reminder.identifier !== identifier));
+      }
     },
     failScheduling(count = 1) {
       schedulingFailures = count;
@@ -1445,6 +1473,167 @@ async function auditReminderCivilDateRefill(): Promise<void> {
     await harness.service.refreshReminderNotificationTimezone();
     assert.equal(harness.pendingSchedules().length, initialCount, "a long background interval must refill an exhausted plan");
   }
+}
+
+async function auditReminderSameDayCapacity(): Promise<void> {
+  const date = (hour: number, minute = 0) => new Date(2026, 7, 29, hour, minute);
+  const epoch = (request: ScheduledHabitReminder) => Number((JSON.parse(request.scheduleKey!) as unknown[])[2]);
+  const habits = Array.from({ length: 33 }, (_, index) => makeHabit({
+    id: index + 1,
+    reminderTime: '["08:00","18:00"]',
+  }));
+  const ios = createReminderServiceHarness({ preserveScheduledState: true, pendingReminderLimit: IOS_PENDING_REMINDER_LIMIT });
+  ios.service.scheduleHabitRemindersSync(habits);
+  await runDeferredReminderServiceWork(ios.service);
+  assert.equal(ios.pendingSchedules().length, 64);
+  const readsBeforeEdge = ios.scheduledListReadCount;
+  await ios.service.refreshReminderNotificationTimezone();
+  assert.equal(ios.scheduledListReadCount, readsBeforeEdge, "foreground before an admitted trigger must not read or rebuild the native plan");
+  ios.setNow(date(9));
+  ios.expireBefore(date(9));
+  const refresh = ios.service.refreshReminderNotificationTimezone();
+  assert.strictEqual(ios.service.refreshReminderNotificationTimezone(), refresh);
+  await refresh;
+  assert.equal(ios.scheduledListReadCount, readsBeforeEdge + 1);
+  assert.equal(ios.pendingSchedules().length, 64);
+  assert.equal(ios.pendingSchedules().filter((request) => epoch(request) === date(18).getTime()).length, 33, "all same-day evening requests must fill capacity freed by morning delivery");
+  const settledReads = ios.scheduledListReadCount;
+  await ios.service.refreshReminderNotificationTimezone();
+  assert.equal(ios.scheduledListReadCount, settledReads, "a refilled plan must stay idle until its next trigger");
+  assert.equal(ios.permissionRequestCount, 0);
+
+  const times = Array.from({ length: 65 }, (_, index) => `${String(8 + Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}`);
+  const android = createReminderServiceHarness({ preserveScheduledState: true });
+  android.service.scheduleHabitRemindersSync([makeHabit({ reminderTime: JSON.stringify(times) })]);
+  await runDeferredReminderServiceWork(android.service);
+  android.setNow(date(8, 1));
+  android.expireBefore(date(8, 1));
+  await android.service.refreshReminderNotificationTimezone();
+  assert.equal(android.pendingSchedules().length, 64);
+  assert.ok(android.pendingSchedules().some((request) => epoch(request) === date(9, 4).getTime()), "the next per-habit request must fill a freed same-day slot");
+
+  const partial = createReminderServiceHarness({ preserveScheduledState: true, pendingReminderLimit: IOS_PENDING_REMINDER_LIMIT });
+  partial.service.scheduleHabitRemindersSync(habits);
+  await runDeferredReminderServiceWork(partial.service);
+  partial.setNow(date(9));
+  const morning = partial.pendingSchedules().filter((request) => epoch(request) === date(8).getTime());
+  partial.deliverReminder(morning[0]!.identifier);
+  const lateIdentifiers = morning.slice(1).map((request) => request.identifier);
+  await partial.service.refreshReminderNotificationTimezone();
+  assert.equal(partial.pendingSchedules().length, 64, "one delivered request frees exactly one native slot");
+  assert.deepEqual(partial.cancelled, [], "overdue inexact requests still pending must not be cancelled as if already delivered");
+  for (const identifier of lateIdentifiers) assert.ok(partial.pendingSchedules().some((request) => request.identifier === identifier));
+  const recordReads = partial.recordReadCount;
+  const scheduled = partial.scheduled.length;
+  await partial.service.refreshReminderNotificationTimezone();
+  assert.equal(partial.recordReadCount, recordReads, "an unchanged overdue native queue must not rebuild candidates on every resume");
+  assert.equal(partial.scheduled.length, scheduled);
+  for (const identifier of lateIdentifiers) partial.deliverReminder(identifier);
+  await partial.service.refreshReminderNotificationTimezone();
+  assert.equal(partial.pendingSchedules().filter((request) => epoch(request) === date(18).getTime()).length, 33);
+  assert.equal(partial.pendingSchedules().length, 64);
+
+  const failed = createReminderServiceHarness({ preserveScheduledState: true, pendingReminderLimit: IOS_PENDING_REMINDER_LIMIT });
+  failed.service.scheduleHabitRemindersSync(habits);
+  await runDeferredReminderServiceWork(failed.service);
+  failed.setNow(date(9));
+  const firstMorning = failed.pendingSchedules().find((request) => epoch(request) === date(8).getTime())!;
+  failed.deliverReminder(firstMorning.identifier);
+  failed.failScheduledListReads();
+  await assert.rejects(failed.service.refreshReminderNotificationTimezone(), /foreground reconciliation failed/);
+  await failed.service.refreshReminderNotificationTimezone();
+  assert.equal(failed.pendingSchedules().length, 64);
+  assert.deepEqual(failed.cancelled, [], "a capacity-probe retry must retain unconsumed overdue requests");
+  assert.equal(failed.permissionRequestCount, 0);
+
+  const partialFailure = createReminderServiceHarness({ preserveScheduledState: true, pendingReminderLimit: IOS_PENDING_REMINDER_LIMIT });
+  partialFailure.service.scheduleHabitRemindersSync(habits);
+  await runDeferredReminderServiceWork(partialFailure.service);
+  partialFailure.setNow(date(9));
+  partialFailure.deliverReminder(partialFailure.pendingSchedules().find((request) => epoch(request) === date(8).getTime())!.identifier);
+  partialFailure.failScheduling();
+  await assert.rejects(partialFailure.service.refreshReminderNotificationTimezone(), /foreground reconciliation failed/);
+  await partialFailure.service.refreshReminderNotificationTimezone();
+  assert.equal(partialFailure.pendingSchedules().length, 64);
+  assert.deepEqual(partialFailure.cancelled, [], "a failed native creation must retry without cancelling retained overdue requests");
+
+  const interrupted = createReminderServiceHarness({ preserveScheduledState: true, pendingReminderLimit: IOS_PENDING_REMINDER_LIMIT });
+  interrupted.service.scheduleHabitRemindersSync(habits);
+  await runDeferredReminderServiceWork(interrupted.service);
+  interrupted.setNow(date(9));
+  interrupted.expireBefore(date(9));
+  interrupted.failSchedulingAfter(1);
+  await assert.rejects(interrupted.service.refreshReminderNotificationTimezone(), /foreground reconciliation failed/);
+  const acceptedBeforeFailure = interrupted.pendingSchedules().map((request) => request.identifier);
+  interrupted.setNow(date(19));
+  await interrupted.service.refreshReminderNotificationTimezone();
+  assert.deepEqual(interrupted.cancelled, [], "an accepted native request must retain overdue ownership if a later creation fails");
+  for (const identifier of acceptedBeforeFailure) assert.ok(interrupted.pendingSchedules().some((request) => request.identifier === identifier));
+  assert.equal(interrupted.pendingSchedules().length, 64);
+
+  const superseded = createReminderServiceHarness({ preserveScheduledState: true });
+  superseded.service.scheduleHabitRemindersSync([reminderHabit]);
+  await runDeferredReminderServiceWork(superseded.service);
+  superseded.setNow(date(9));
+  superseded.expireBefore(date(9));
+  const heldRead = superseded.holdNextScheduledListRead();
+  const oldRefresh = superseded.service.refreshReminderNotificationTimezone();
+  await heldRead.started;
+  superseded.service.scheduleHabitRemindersSync([makeHabit({ reminderTime: '["19:00"]' })]);
+  superseded.service.startPendingReminderWorkBeforeBackground();
+  heldRead.release();
+  await oldRefresh;
+  await runDeferredReminderServiceWork(superseded.service);
+  assert.ok(superseded.pendingSchedules().every((request) => new Date(epoch(request)).getHours() === 19), "a newer full revision must supersede an in-flight capacity refill");
+
+  const replaced = createReminderServiceHarness({ preserveScheduledState: true });
+  replaced.service.scheduleHabitRemindersSync([reminderHabit]);
+  await runDeferredReminderServiceWork(replaced.service);
+  replaced.setNow(date(9));
+  replaced.expireBefore(date(9));
+  const replacement = await replaced.service.flushAndFreezePendingReminderWork();
+  const bufferedRefresh = replaced.service.refreshReminderNotificationTimezone();
+  replaced.setSnapshot([makeHabit({ id: 2, reminderTime: '["20:00"]' })]);
+  await replacement.release("import-committed");
+  await bufferedRefresh;
+  await replaced.service.reconcileReminderNotificationsAfterImport();
+  assert.ok(replaced.pendingSchedules().every((request) => request.habitId === 2 && new Date(epoch(request)).getHours() === 20), "replacement must discard buffered refill ownership and rebuild from the imported snapshot");
+  const importedReads = replaced.scheduledListReadCount;
+  await replaced.service.refreshReminderNotificationTimezone();
+  assert.equal(replaced.scheduledListReadCount, importedReads);
+
+  const denied = createReminderServiceHarness({ preserveScheduledState: true });
+  denied.service.scheduleHabitRemindersSync([reminderHabit]);
+  await runDeferredReminderServiceWork(denied.service);
+  denied.setNow(date(9));
+  denied.expireBefore(date(9));
+  denied.setPermissionGranted(false);
+  await denied.service.refreshReminderNotificationTimezone();
+  assert.equal(denied.permissionRequestCount, 0, "capacity maintenance must not acquire permission-prompt authority after revocation");
+  await denied.service.setReminderNotificationsEnabled(false);
+  assert.equal(denied.pendingSchedules().length, 0);
+  const disabledReads = denied.scheduledListReadCount;
+  await denied.service.refreshReminderNotificationTimezone();
+  assert.equal(denied.scheduledListReadCount, disabledReads, "disabled reminders must discard their admitted trigger hints");
+
+  const changed = createReminderServiceHarness({ preserveScheduledState: true });
+  changed.service.scheduleHabitRemindersSync([reminderHabit]);
+  await runDeferredReminderServiceWork(changed.service);
+  changed.setNow(date(9));
+  changed.setRecords([{ habitId: reminderHabit.id, date: "2026-08-29", status: "done" }]);
+  changed.service.scheduleHabitReminderAfterRecordChange([reminderHabit], reminderHabit.id);
+  await runDeferredReminderServiceWork(changed.service);
+  assert.ok(changed.pendingSchedules().every((request) => epoch(request) > date(9).getTime()), "authoritative record reconciliation must remove handled overdue requests");
+  const readsAfterRecord = changed.scheduledListReadCount;
+  await changed.service.refreshReminderNotificationTimezone();
+  assert.equal(changed.scheduledListReadCount, readsAfterRecord, "record reconciliation must replace the capacity hint for its scope");
+  changed.service.scheduleHabitRemindersSync([makeHabit({ reminderTime: '["19:00"]' })]);
+  await runDeferredReminderServiceWork(changed.service);
+  assert.ok(changed.pendingSchedules().every((request) => new Date(epoch(request)).getHours() === 19));
+  changed.setNow(date(7));
+  const readsBeforeRollback = changed.scheduledListReadCount;
+  await changed.service.refreshReminderNotificationTimezone();
+  assert.equal(changed.scheduledListReadCount, readsBeforeRollback, "clock rollback must not resurrect replaced schedules");
 }
 
 type NativeNotificationResponseListener = Parameters<
@@ -2841,6 +3030,7 @@ void Promise.race([
     await auditReminderSnapshotRecovery();
     await auditDeniedReminderCleanup();
     await auditReminderCivilDateRefill();
+    await auditReminderSameDayCapacity();
     await auditNotificationAdapterBehavior();
     console.log("Reminder sync audit passed.");
   })(),

@@ -18,6 +18,7 @@ import {
   buildUpcomingReminderDates,
   canScheduleHabitReminders,
   isReminderRecordedStatus,
+  REMINDER_MAX_PER_HABIT,
   type ReminderScheduleRecord,
 } from "@/domain/reminders/reminder-schedule";
 import { buildReminderSyncSignature } from "@/domain/reminders/reminder-sync-signature";
@@ -33,6 +34,7 @@ interface ReminderSyncOptions {
   readonly force?: boolean;
   readonly refreshAndroidChannel?: boolean;
   readonly requestPermission?: boolean;
+  readonly refillPending?: boolean;
 }
 
 export interface ReminderSyncIntent {
@@ -64,6 +66,7 @@ interface FullReminderSyncRequest {
   readonly refreshAndroidChannel: boolean;
   readonly requestPermission: boolean;
   readonly permissionRequestRevision: number;
+  readonly refillPending: boolean;
 }
 
 export interface PendingReminderReplacementBoundary {
@@ -133,6 +136,12 @@ class ReminderApplicationService implements ReminderService {
   private snapshotRecoveryRequired = false;
   private snapshotRecoveryPromise: Promise<void> | null = null;
   private foregroundRefreshPromise: Promise<void> | null = null;
+  // A failed capacity-only attempt may retry the same plan, but a later
+  // authoritative revision must not inherit its overdue-retention policy.
+  private capacityRefreshRevision = 0;
+  // Scheduling inputs are only a trigger-time hint. Native pending requests
+  // remain authoritative for delivery and available capacity.
+  private readonly admittedSchedules = new Map<string, DesiredReminderSchedule>();
 
   private readonly replacementGate: ReminderReplacementGate;
   private readonly deferredWork: DeferredReminderWorkCoordinator<Habit[]>;
@@ -150,6 +159,8 @@ class ReminderApplicationService implements ReminderService {
         this.lastSyncSignature = null;
         this.nativeReconciliationDirty = true;
         this.pendingExplicitPermissionRequest = false;
+        this.capacityRefreshRevision = 0;
+        this.admittedSchedules.clear();
       },
     );
     this.deferredWork = new DeferredReminderWorkCoordinator<Habit[]>({
@@ -235,6 +246,7 @@ class ReminderApplicationService implements ReminderService {
     const habitsSnapshot = [...habitsList];
     this.replacementGate.schedule(async () => {
       this.snapshotGeneration += 1;
+      this.capacityRefreshRevision = 0;
       this.deferredWork.scheduleRecordSync(habitsSnapshot, habitId);
     });
   }
@@ -376,6 +388,7 @@ class ReminderApplicationService implements ReminderService {
         return { canceledCount: identifiers.length, completed: false };
       }
     }
+    this.admittedSchedules.clear();
     return { canceledCount: identifiers.length, completed: true };
   }
 
@@ -404,6 +417,15 @@ class ReminderApplicationService implements ReminderService {
     scopeHabitIds?: ReadonlySet<number>,
     allowScheduling = true,
   ): Promise<boolean> {
+    const pendingKeys = new Set<string>();
+    for (const reminders of existingByHabit.values()) {
+      for (const reminder of reminders) {
+        if (reminder.scheduleKey != null) pendingKeys.add(reminder.scheduleKey);
+      }
+    }
+    for (const key of this.admittedSchedules.keys()) {
+      if (!pendingKeys.has(key)) this.admittedSchedules.delete(key);
+    }
     const desiredByKey = new Map<string, DesiredReminderSchedule>();
     const desiredHabitIds = new Set<number>();
     for (const desired of desiredSchedules) {
@@ -462,10 +484,65 @@ class ReminderApplicationService implements ReminderService {
       await this.dependencies.notifications.scheduleHabitReminder(
         desired.input,
       );
+      // A later unit can fail after this request has already been accepted.
+      this.admittedSchedules.set(desired.scheduleKey, desired);
       if (control && !(await control.checkpoint())) return false;
     }
 
+    if (control && !control.isCurrent()) return false;
+    for (const [key, schedule] of this.admittedSchedules) {
+      if (!scopeHabitIds || scopeHabitIds.has(schedule.input.habitId)) {
+        this.admittedSchedules.delete(key);
+      }
+    }
+    const missingKeys = new Set(missing.map((schedule) => schedule.scheduleKey));
+    for (const desired of desiredByKey.values()) {
+      if (allowScheduling || !missingKeys.has(desired.scheduleKey)) {
+        this.admittedSchedules.set(desired.scheduleKey, desired);
+      }
+    }
     return true;
+  }
+
+  private pendingMatchesAdmittedSchedules(
+    existingByHabit: ReadonlyMap<number, readonly ScheduledHabitReminder[]>,
+  ): boolean {
+    const keys = new Set<string>();
+    for (const reminders of existingByHabit.values()) {
+      for (const reminder of reminders) {
+        if (
+          reminder.scheduleKey == null ||
+          keys.has(reminder.scheduleKey) ||
+          !this.admittedSchedules.has(reminder.scheduleKey)
+        ) {
+          return false;
+        }
+        keys.add(reminder.scheduleKey);
+      }
+    }
+    return keys.size === this.admittedSchedules.size;
+  }
+
+  private pendingOverdueSchedules(
+    existingByHabit: ReadonlyMap<number, readonly ScheduledHabitReminder[]>,
+    recordsByHabit: ReadonlyMap<number, readonly ReminderScheduleRecord[]>,
+    now: Date,
+  ): DesiredReminderSchedule[] {
+    const retained = new Map<string, DesiredReminderSchedule>();
+    for (const reminders of existingByHabit.values()) {
+      for (const reminder of reminders) {
+        const admitted =
+          reminder.scheduleKey == null
+            ? undefined
+            : this.admittedSchedules.get(reminder.scheduleKey);
+        if (!admitted || admitted.input.date.getTime() > now.getTime()) continue;
+        const handled = recordsByHabit.get(admitted.input.habitId)?.some(
+          (record) => record.date === format(admitted.input.date, "yyyy-MM-dd"),
+        );
+        if (!handled) retained.set(admitted.scheduleKey, admitted);
+      }
+    }
+    return [...retained.values()];
   }
 
   private async replaceGloballyLimitedReminderSchedule(
@@ -476,6 +553,7 @@ class ReminderApplicationService implements ReminderService {
     control: ReminderWorkControl,
     now: Date,
     allowScheduling: boolean,
+    retainedOverdue: readonly DesiredReminderSchedule[] = [],
   ): Promise<boolean> {
     const candidates: {
       readonly habit: Habit;
@@ -509,12 +587,15 @@ class ReminderApplicationService implements ReminderService {
     );
     const selected = candidates.slice(
       0,
-      Math.max(0, Math.floor(pendingReminderLimit)),
+      Math.max(0, Math.floor(pendingReminderLimit) - retainedOverdue.length),
     );
 
-    const desired = selected.flatMap((candidate) =>
-      this.buildDesiredSchedules(candidate.habit, [candidate.date]),
-    );
+    const desired = [
+      ...retainedOverdue,
+      ...selected.flatMap((candidate) =>
+        this.buildDesiredSchedules(candidate.habit, [candidate.date]),
+      ),
+    ];
     if (
       !(await this.reconcileDesiredSchedules(
         desired,
@@ -595,6 +676,7 @@ class ReminderApplicationService implements ReminderService {
     const planningDateChanged =
       format(this.dependencies.clock.now(), "yyyy-MM-dd") !==
       this.lastPlanningDate;
+    const now = this.dependencies.clock.now();
     const hasConfiguredReminder =
       this.reminderNotificationsEnabled &&
       this.latestHabitsSnapshot.some((habit) =>
@@ -611,6 +693,29 @@ class ReminderApplicationService implements ReminderService {
         this.lastSyncSignature = null;
         this.nativeReconciliationDirty = true;
       }
+    }
+    if (
+      !timezoneChanged &&
+      !planningDateChanged &&
+      !this.nativeChannelRefreshDirty &&
+      hasConfiguredReminder &&
+      this.queuedReminderSyncCount === 0 &&
+      this.settledFullSyncRevision === this.requestedFullSyncRevision &&
+      (this.buildFullSyncSignature(
+        this.latestHabitsSnapshot,
+        format(now, "yyyy-MM-dd"),
+      ) === this.lastSyncSignature ||
+        this.capacityRefreshRevision === this.requestedFullSyncRevision) &&
+      [...this.admittedSchedules.values()].some(
+        (schedule) => schedule.input.date.getTime() <= now.getTime(),
+      )
+    ) {
+      const succeeded = await this.syncHabitRemindersNow(
+        this.latestHabitsSnapshot,
+        { force: true, refillPending: true },
+      );
+      if (!succeeded) throw new Error("Reminder foreground reconciliation failed");
+      return;
     }
     if (
       !timezoneChanged &&
@@ -786,9 +891,30 @@ class ReminderApplicationService implements ReminderService {
       await this.dependencies.notifications.listScheduledHabitReminders();
     if (!(await control.checkpoint())) return false;
 
+    if (
+      request.refillPending &&
+      granted &&
+      !this.nativeReconciliationDirty &&
+      this.pendingMatchesAdmittedSchedules(existingByHabit)
+    ) {
+      this.lastSyncSignature = request.signature;
+      return true;
+    }
+
     const completionRecordsByHabit =
       await this.loadReminderRecordsByHabit(toSchedule);
     if (!(await control.checkpoint())) return false;
+
+    // An elapsed trigger is not proof of delivery: Android may still hold an
+    // inexact request. Only a same-plan capacity refill retains those requests.
+    const retainedOverdue =
+      request.refillPending && granted
+        ? this.pendingOverdueSchedules(
+            existingByHabit,
+            completionRecordsByHabit,
+            request.now,
+          )
+        : [];
 
     const pendingReminderLimit =
       this.dependencies.notifications.pendingReminderLimit;
@@ -802,12 +928,13 @@ class ReminderApplicationService implements ReminderService {
           control,
           request.now,
           granted,
+          retainedOverdue,
         ))
       ) {
         return false;
       }
     } else {
-      const desired: DesiredReminderSchedule[] = [];
+      const desired: DesiredReminderSchedule[] = [...retainedOverdue];
       const now = request.now;
       for (const habit of toSchedule) {
         if (!control.isCurrent()) return false;
@@ -816,7 +943,15 @@ class ReminderApplicationService implements ReminderService {
           completionRecordsByHabit.get(habit.id) ?? [],
           now,
         );
-        desired.push(...this.buildDesiredSchedules(habit, dates));
+        const retainedCount = retainedOverdue.filter(
+          (schedule) => schedule.input.habitId === habit.id,
+        ).length;
+        desired.push(
+          ...this.buildDesiredSchedules(
+            habit,
+            dates.slice(0, Math.max(0, REMINDER_MAX_PER_HABIT - retainedCount)),
+          ),
+        );
         if (!(await control.checkpoint())) return false;
       }
       if (
@@ -856,6 +991,7 @@ class ReminderApplicationService implements ReminderService {
           this.permissionRequestRevision >
           this.settledPermissionRequestRevision,
         permissionRequestRevision: this.permissionRequestRevision,
+        refillPending: revision === this.capacityRefreshRevision,
       };
       let applied = false;
       const queueSettledWithoutError = await this.enqueueReminderSync(
@@ -902,6 +1038,7 @@ class ReminderApplicationService implements ReminderService {
   ): Promise<boolean> {
     this.latestFullSyncSnapshot = [...habitsSnapshot];
     const revision = ++this.requestedFullSyncRevision;
+    this.capacityRefreshRevision = options?.refillPending ? revision : 0;
     if (options?.force) this.forcedFullSyncRevision = revision;
     if (options?.refreshAndroidChannel) {
       this.refreshAndroidChannelRevision = revision;

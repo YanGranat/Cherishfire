@@ -3691,7 +3691,7 @@ assertSourceOrder(
 );
 assert.match(
   notesSession,
-  /for \(;;\) \{[\s\S]{0,500}gateway\.load[\s\S]{0,350}!this\.gateway\.isLoadResultCurrent\(loaded\)[\s\S]{0,100}continue/,
+  /for \(;;\) \{[\s\S]{0,500}gateway\.load[\s\S]{0,350}const isCurrent = this\.gateway\.isLoadResultCurrent\(loaded\);[\s\S]{0,200}if \(!isCurrent\) \{[\s\S]{0,100}continue/,
   "a write registered after the application result but before session publication must force one more read",
 );
 assert.match(
