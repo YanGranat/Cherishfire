@@ -4,13 +4,22 @@
 
 An offline habit tracker built with Expo and React Native.
 
-Create repeating habits, track daily outcomes, keep notes, set local reminders,
-and review progress. Habits, history, and settings stay on the device and can
-be exported to or restored from a JSON backup.
+## Features
+
+- Schedule habits daily, on selected days of the week or dates of the month,
+  or at fixed or completion-based intervals.
+- Record Done, Minimum, Maximum, Failure, or Skipped outcomes, with optional
+  reasons for failures and skips.
+- Browse each habit's calendar, current and best streaks, and dated notes.
+- Set multiple local reminder times for each habit.
+- Review weekly, monthly, and yearly statistics, with a separate block order
+  for each period.
+- Archive and restore habits without deleting their history.
+- Export and restore habits, history, notes, and preferences as JSON.
 
 ## Preview
 
-![Cherishfire app preview](Screenshots/cherishfire-overview.png)
+![Habit calendar, monthly repeat settings, and notes](Screenshots/cherishfire-overview.png)
 
 ## Development
 
