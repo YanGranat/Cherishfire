@@ -4,6 +4,8 @@
 
 An offline habit tracker with flexible schedules, notes, and progress statistics.
 
+[Download APK](https://github.com/YanGranat/Cherishfire/releases/download/v1.5.116/Cherishfire-1.5.116-android.apk)
+
 ## Features
 
 - Schedule habits daily, on selected days of the week or dates of the month,
@@ -46,6 +48,8 @@ npm start
 
 For a local native build, install the Android or iOS toolchain and run
 `npm run android` or `npm run ios`. iOS builds require macOS and Xcode.
+
+EAS Android release builds use [local signing credentials](https://docs.expo.dev/app-signing/local-credentials/).
 
 ## Checks
 

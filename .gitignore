@@ -29,6 +29,8 @@ expo-env.d.ts
 !.env.sample
 
 # Secrets and credentials
+credentials.json
+.signing/
 *.pem
 *.cer
 *.crt

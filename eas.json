@@ -13,12 +13,14 @@
       "node": "24.22.0",
       "distribution": "internal",
       "android": {
+        "credentialsSource": "local",
         "buildType": "apk"
       }
     },
     "production": {
       "node": "24.22.0",
       "android": {
+        "credentialsSource": "local",
         "buildType": "app-bundle"
       }
     }
