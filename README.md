@@ -2,7 +2,7 @@
 
 ![Cherishfire](Screenshots/cherishfire-hero.png)
 
-An offline habit tracker built with Expo and React Native.
+An offline habit tracker with flexible schedules, notes, and progress statistics.
 
 ## Features
 
@@ -16,10 +16,24 @@ An offline habit tracker built with Expo and React Native.
   for each period.
 - Archive and restore habits without deleting their history.
 - Export and restore habits, history, notes, and preferences as JSON.
+- Choose light, dark, or system appearance and customize accent colors.
 
 ## Preview
 
 ![Habit calendar, monthly repeat settings, and notes](Screenshots/cherishfire-overview.png)
+
+## Stack
+
+TypeScript, Expo, and React Native, with Expo Router for navigation, Zustand for
+shared state, and NativeWind for styling. Reanimated and React Native Gesture
+Handler handle animations and drag gestures. Data is stored locally with Expo
+SQLite; Drizzle defines the schema and manages migrations.
+
+## Architecture
+
+Routes and screen composition live in `app/`, with feature components and hooks
+in `src/features/`. Domain rules and application services are separated from
+SQLite repositories and native adapters, wired through `src/composition/`.
 
 ## Development
 
