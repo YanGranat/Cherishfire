@@ -16,7 +16,7 @@ export function AboutDialog({ visible, onClose }: AboutDialogProps) {
   const effectiveMode = useVisualEffectiveMode();
   const isDarkTheme = effectiveMode === "dark";
   const palette = isDarkTheme ? darkTheme : lightTheme;
-  const appVersion = Constants.expoConfig?.version ?? "1.5.117";
+  const appVersion = Constants.expoConfig?.version ?? "1.5.118";
   return (
     <Dialog
       visible={visible}

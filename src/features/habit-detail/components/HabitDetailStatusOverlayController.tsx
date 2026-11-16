@@ -156,7 +156,7 @@ function HabitDetailStatusOverlayControllerComponent(
     [publishDayMenu, publishFailureDialog],
   );
   const submitFailureReason = useCallback(
-    (reason: string | undefined) => {
+    (reason: string) => {
       const current = failureDialogRef.current;
       const gate = failureIntentGateRef.current;
       if (!current?.visible || !gate?.claim()) {
@@ -165,13 +165,19 @@ function HabitDetailStatusOverlayControllerComponent(
       pendingFailureSubmissionRef.current = {
         date: current.date,
         status: current.status,
-        ...(reason === undefined ? null : { reason }),
+        reason,
       };
       publishFailureDialog({ ...current, visible: false });
       return true;
     },
     [publishFailureDialog],
   );
+  const cancelFailureReason = useCallback(() => {
+    const current = failureDialogRef.current;
+    const gate = failureIntentGateRef.current;
+    if (!current?.visible || !gate?.claim()) return;
+    publishFailureDialog({ ...current, visible: false });
+  }, [publishFailureDialog]);
   return (
     <>
       {dayMenu ? (
@@ -192,7 +198,7 @@ function HabitDetailStatusOverlayControllerComponent(
         <FailureReasonDialog
           visible={failureDialog.visible}
           status={failureDialog.status}
-          onSkip={() => submitFailureReason(undefined)}
+          onCancel={cancelFailureReason}
           onSave={(reason) => submitFailureReason(reason)}
           onDismiss={flushPendingFailureSubmission}
         />

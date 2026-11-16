@@ -10,8 +10,7 @@ interface FailureReasonDialogProps {
   visible: boolean;
   status: FailureReasonStatus;
   initialReason?: string;
-  onCancel?: () => void;
-  onSkip: () => boolean | Promise<boolean>;
+  onCancel: () => void;
   onSave: (reason: string) => boolean | Promise<boolean>;
   onDismiss?: () => void;
 }
@@ -22,13 +21,11 @@ type FailureReasonDialogSessionSnapshot = Pick<
   FailureReasonDialogProps,
   "status" | "initialReason"
 >;
-// An explicit cancel action also admits Back and scrim dismissal.
 function FailureReasonDialogSession({
   visible,
   status,
   initialReason = "",
   onCancel,
-  onSkip,
   onSave,
   onDismiss,
 }: FailureReasonDialogSessionProps) {
@@ -57,8 +54,10 @@ function FailureReasonDialogSession({
       }
     }
   };
-  const handleSkip = () => {
-    return submit(onSkip);
+  const handleCancel = () => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    onCancel();
   };
   const handleSave = () => {
     return submit(() => onSave(reason.trim()));
@@ -84,9 +83,9 @@ function FailureReasonDialogSession({
       actionButtonStyle={{ minHeight: 35, paddingVertical: 1.25 }}
       actions={[
         {
-          label: t(onCancel ? "common.cancel" : "failureDialog.skip"),
-          onPress: onCancel ?? handleSkip,
-          role: onCancel ? "cancel" : undefined,
+          label: t("common.cancel"),
+          onPress: handleCancel,
+          role: "cancel",
           disabled: isSubmitting,
         },
         {
@@ -145,7 +144,6 @@ function FailureReasonDialogComponent(props: FailureReasonDialogProps) {
       status={snapshot.status}
       initialReason={snapshot.initialReason}
       onCancel={props.onCancel}
-      onSkip={props.onSkip}
       onSave={props.onSave}
       onDismiss={handleSessionDismiss}
     />

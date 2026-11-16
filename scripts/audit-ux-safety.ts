@@ -1680,7 +1680,7 @@ assert.match(
 );
 assert.match(
   failureReasonDialog,
-  /status=\{snapshot\.status\}[\s\S]{0,120}onSkip=\{props\.onSkip\}[\s\S]{0,80}onSave=\{props\.onSave\}/,
+  /status=\{snapshot\.status\}[\s\S]{0,160}onCancel=\{props\.onCancel\}[\s\S]{0,80}onSave=\{props\.onSave\}/,
   "failure reason callbacks must remain current while its session is open",
 );
 assert.match(dialog, /onDismiss\?: \(\) => void/);

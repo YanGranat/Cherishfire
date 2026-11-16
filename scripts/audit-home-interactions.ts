@@ -20,6 +20,7 @@ import { subDays } from "date-fns/subDays";
 
 import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-audit";
 import { loadHabitStoreForAudit } from "./fixtures/load-habit-store-for-audit";
+import { auditReasonDialogCancellation } from "./fixtures/audit-reason-dialog-cancellation";
 
 import { MAIN_CALENDAR_FUTURE_DAYS } from "../src/features/habits/constants";
 
@@ -1963,7 +1964,7 @@ function auditReasonCommandDate(source: string): void {
     "a captured date that is already future must refuse Save without dismissal");
   assert.equal(update(today).props.visible, true);
   assert.equal(typeof update(today).props.onCancel, "function",
-    "clock rollback while open must expose a future-only cancel action");
+    "clock rollback while open must retain an explicit cancel action");
   today = "2031-04-05";
   assert.equal(update(today).props.onSave("Clock reason"), true);
   today = "2031-04-04";
@@ -2012,6 +2013,8 @@ function auditReasonCommandDate(source: string): void {
   assert.equal(calls.length, 1, "explicit future cancellation must not dispatch a status command");
 
   today = "2031-04-05";
+  target.current!.open({ habitId: 41, date: today, status: "failure" });
+  update(today);
   assert.equal(update(today).props.onSave("Reversal reason"), true);
   today = "2031-04-04";
   update(today);
@@ -2034,16 +2037,45 @@ function auditReasonCommandDate(source: string): void {
   assert.equal(update(today).props.initialReason, "",
     "a normal new dialog session must not inherit a previous reason");
   const normalDialog = renderReason(wrapReason(update(today).props).props);
-  assert.equal(normalDialog.props.actions[0].label, "failureDialog.skip",
-    "normal reason sessions must retain their existing Skip action");
-  assert.equal(normalDialog.props.actions[0].role, undefined);
+  assert.equal(normalDialog.props.actions[0].label, "common.cancel",
+    "every reason session must expose cancellation instead of submitting an empty reason");
+  assert.equal(normalDialog.props.actions[0].role, "cancel");
   assert.equal(calls.filter((call) => call[4] === "Retried reason").length, 1,
     "a successful close-open handoff must dispatch once before a new session");
   assert.equal(update(today).props.onSave("Unmount reason"), true);
+  update(today).props.onCancel();
+  assert.equal(update(today).props.visible, false,
+    "late cancellation must not reopen a submitted reason");
   today = "2031-04-04";
   cleanups.forEach((cleanup) => cleanup());
   assert.equal(update(today).props.visible, false,
     "cleanup refusal must not resurrect an unmounted reason dialog");
+
+  for (const status of ["failure", "skipped"]) {
+    today = "2031-04-05";
+    const before: number = calls.length;
+    target.current!.open({ habitId: 42, date: today, status });
+    const cancelled = update(today);
+    assert.equal(typeof cancelled.props.onCancel, "function",
+      "ordinary reason sessions must expose cancellation");
+    cancelled.props.onCancel();
+    const hidden = update(today);
+    assert.equal(hidden.props.visible, false);
+    assert.equal(hidden.props.onSave("Discarded reason"), false,
+      "a cancelled session must refuse a new submission");
+    hidden.props.onDismiss();
+    cleanups.forEach((cleanup) => cleanup());
+    assert.equal(calls.length, before,
+      "cancellation, dismissal and unmount must not submit a reason or status");
+    target.current!.open({ habitId: 42, date: today, status });
+    const saving = update(today);
+    assert.equal(saving.props.initialReason, "");
+    assert.equal(saving.props.onSave("Accepted reason"), true);
+    saving.props.onCancel();
+    update(today).props.onDismiss();
+    assert.equal(calls.length, before + 1,
+      "late cancellation must not discard an accepted status command");
+  }
 
   const persisted: unknown[][] = [];
   const transferred: unknown[][] = [];
@@ -2268,12 +2300,12 @@ const mutationCases: [
     /date-owner publications/,
   ],
   [
-    "reason-future-cancel",
+    "reason-cancel",
     homeSource,
-    "onCancel={dateIsFuture ? cancel : undefined}",
+    "onCancel={cancel}",
     "onCancel={undefined}",
     auditReasonCommandDate,
-    /future-only cancel/,
+    /explicit cancel/,
   ],
   [
     "reason-future-preflight",
@@ -2584,6 +2616,7 @@ const auditDeadline = setTimeout(() => {
   process.exitCode = 1;
 }, 10_000);
 void (async () => {
+  await auditReasonDialogCancellation(loadTsxCallable);
   await auditFutureReasonStoreRefusal();
   await assert.rejects(() => auditFutureReasonStoreRefusal(true), {
     name: "AssertionError", message: /actual store must refuse/,

@@ -425,9 +425,7 @@ const HomeFailureReasonController = React.memo(
         status: "failure" as "failure" | "skipped",
         initialReason: "",
       });
-      // The currentLocalDate prop keeps this isolated overlay subscribed to date
-      // changes; read the clock too for input before the next date publication.
-      const dateIsFuture = session.date > format(new Date(), "yyyy-MM-dd");
+      // Date publications refresh this overlay; submission also checks the clock.
       const canSubmitRef = useRef(canSubmit);
       canSubmitRef.current = canSubmit;
       const onSubmitRef = useRef(onSubmit);
@@ -480,7 +478,7 @@ const HomeFailureReasonController = React.memo(
       useLayoutEffect(() => () => { flushPendingSubmit(false); }, [flushPendingSubmit]);
       const submit = useCallback(
         (reason: string | null) => {
-          if (pendingSubmitRef.current) return false;
+          if (!session.visible || pendingSubmitRef.current) return false;
           if (!canSubmit(session.date)) {
             setSession((current) => ({ ...current }));
             return false;
@@ -499,10 +497,10 @@ const HomeFailureReasonController = React.memo(
           }));
           return true;
         },
-        [canSubmit, session.date, session.habitId, session.status],
+        [canSubmit, session.visible, session.date, session.habitId, session.status],
       );
       const cancel = useCallback(() => {
-        pendingSubmitRef.current = null;
+        if (pendingSubmitRef.current) return;
         setSession((current) => ({ ...current, visible: false }));
       }, []);
       return (
@@ -510,8 +508,7 @@ const HomeFailureReasonController = React.memo(
           visible={session.visible}
           status={session.status}
           initialReason={session.initialReason}
-          onCancel={dateIsFuture ? cancel : undefined}
-          onSkip={() => submit(null)}
+          onCancel={cancel}
           onSave={(reason) => submit(reason)}
           onDismiss={flushPendingSubmit}
         />
