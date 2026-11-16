@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { withAuditDeadline } from "./fixtures/with-audit-deadline";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -611,7 +612,7 @@ async function auditBoundedImportRead(): Promise<void> {
   );
 }
 
-void auditBoundedImportRead()
+void withAuditDeadline(auditBoundedImportRead, "Export compatibility audit")
   .then(() => {
     console.log("Export compatibility baseline audit passed.");
   })

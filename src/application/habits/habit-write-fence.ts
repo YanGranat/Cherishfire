@@ -2,6 +2,10 @@ interface PendingHabitWrite {
   sequence: number;
   settled: Promise<void>;
   capturedFence: ActiveHabitWriteFence | null;
+  scheduleHabitId: number | null;
+  recordHabitId: number | null;
+  scheduleDependency: number;
+  mustPersistSchedule: boolean;
 }
 
 export interface PendingHabitWriteFence {
@@ -30,6 +34,7 @@ interface ActiveHabitWriteFence {
 
 const pendingHabitWrites = new Map<number, PendingHabitWrite>();
 const activeHabitWriteFences = new Map<number, ActiveHabitWriteFence>();
+const scheduleRevisionByHabitId = new Map<number, number>();
 let nextHabitWriteSequence = 0;
 let nextHabitWriteFenceId = 0;
 let currentStartingHabitWriteSequence: number | null = null;
@@ -37,6 +42,75 @@ let currentStartingHabitWriteSequence: number | null = null;
 export interface HabitReadBarrier {
   readonly revision: number;
   readonly settled: Promise<void>;
+}
+
+export interface HabitScheduleWriteBarrier extends HabitReadBarrier {
+  readonly habitId: number;
+  readonly hasPendingWrites: boolean;
+}
+
+/** Captures only predecessor schedule commands, never this record command. */
+export function captureHabitScheduleWriteBarrier(
+  habitId: number,
+): HabitScheduleWriteBarrier {
+  const writes = [...pendingHabitWrites.values()].filter(
+    (write) => write.scheduleHabitId === habitId,
+  );
+  return {
+    habitId,
+    revision: scheduleRevisionByHabitId.get(habitId) ?? 0,
+    hasPendingWrites: writes.length > 0,
+    settled: Promise.all(writes.map((write) => write.settled)).then(() => undefined),
+  };
+}
+
+export function isHabitScheduleWriteBarrierCurrent(
+  barrier: HabitScheduleWriteBarrier,
+): boolean {
+  return barrier.revision === (scheduleRevisionByHabitId.get(barrier.habitId) ?? 0);
+}
+
+export function capturePredecessorHabitDataWrites(habitId: number): Promise<void> {
+  const sequence = getCurrentHabitWriteSequence();
+  return Promise.all(
+    [...pendingHabitWrites.values()]
+      .filter(
+        (write) =>
+          write.sequence < sequence &&
+          (write.scheduleHabitId === habitId || write.recordHabitId === habitId),
+      )
+      .map((write) => write.settled),
+  ).then(() => undefined);
+}
+
+/** A record admitted against this version must not lose its prerequisite. */
+export function isHabitScheduleWriteRequired(
+  habitId: number,
+  sequence: number,
+): boolean {
+  return (
+    pendingHabitWrites.get(sequence)?.mustPersistSchedule === true ||
+    [...pendingHabitWrites.values()].some(
+      (write) =>
+        write.recordHabitId === habitId && write.scheduleDependency === sequence,
+    )
+  );
+}
+
+/** Accepted record pruning is irreversible; later edits cannot cancel it. */
+export function retainDestructiveHabitScheduleWrite(sequence: number): void {
+  const write = pendingHabitWrites.get(sequence);
+  if (write?.scheduleHabitId != null) write.mustPersistSchedule = true;
+}
+
+export function forgetHabitScheduleWriteRevisions(
+  habitIds: Iterable<number>,
+): void {
+  for (const habitId of habitIds) scheduleRevisionByHabitId.delete(habitId);
+}
+
+export function resetHabitScheduleWriteRevisions(): void {
+  scheduleRevisionByHabitId.clear();
 }
 
 /** Observes accepted writes without creating or extending a transfer fence. */
@@ -53,7 +127,11 @@ export function isHabitReadBarrierCurrent(barrier: HabitReadBarrier): boolean {
   return barrier.revision === nextHabitWriteSequence;
 }
 
-function registerPendingHabitWriteSequence(sequence: number): () => void {
+function registerPendingHabitWriteSequence(
+  sequence: number,
+  scheduleHabitId: number | null,
+  recordHabitId: number | null,
+): () => void {
   let settle!: () => void;
   const settled = new Promise<void>((resolve) => {
     settle = resolve;
@@ -62,7 +140,19 @@ function registerPendingHabitWriteSequence(sequence: number): () => void {
     [...activeHabitWriteFences.values()].find(
       ({ token }) => sequence > token.cutoffSequence,
     ) ?? null;
-  pendingHabitWrites.set(sequence, { sequence, settled, capturedFence });
+  pendingHabitWrites.set(sequence, {
+    sequence,
+    settled,
+    capturedFence,
+    scheduleHabitId,
+    recordHabitId,
+    mustPersistSchedule: false,
+    scheduleDependency:
+      recordHabitId == null ? 0 : (scheduleRevisionByHabitId.get(recordHabitId) ?? 0),
+  });
+  if (scheduleHabitId != null) {
+    scheduleRevisionByHabitId.set(scheduleHabitId, sequence);
+  }
   return () => {
     if (pendingHabitWrites.get(sequence)?.settled === settled) {
       pendingHabitWrites.delete(sequence);
@@ -76,13 +166,19 @@ export function withPendingHabitWriteTracking<
   TResult,
 >(
   action: (...args: TArgs) => Promise<TResult>,
+  getScheduleHabitId?: (...args: TArgs) => number | null,
+  getRecordHabitId?: (...args: TArgs) => number | null,
 ): (...args: TArgs) => Promise<TResult> {
   return (...args) => {
     const sequence = ++nextHabitWriteSequence;
     // Register before invoking presentation/state code. A synchronous store
     // subscriber can start export/import while the action is still applying
     // its optimistic state; that fence must already see this write.
-    const settle = registerPendingHabitWriteSequence(sequence);
+    const settle = registerPendingHabitWriteSequence(
+      sequence,
+      getScheduleHabitId?.(...args) ?? null,
+      getRecordHabitId?.(...args) ?? null,
+    );
     const previousStartingSequence = currentStartingHabitWriteSequence;
     currentStartingHabitWriteSequence = sequence;
     let operation: Promise<TResult>;

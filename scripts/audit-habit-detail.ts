@@ -382,8 +382,8 @@ assertSourceOrder(
     "if (!currentHabit)",
     "if (currentHabit.isArchived)",
     "areRepeatSchedulesEqual(currentHabit.repeatSchedule, schedule)",
-    "previewSchedule({ repeatSchedule: schedule });",
     'runDetailAction("repeat"',
+    "await updateHabit(habitId, {",
   ],
   "repeat apply must reject stale/archived/no-op input before optimistic state and persistence",
 );
@@ -395,8 +395,8 @@ assertSourceOrder(
     "if (currentHabit.isArchived)",
     "const nextStartDate = date;",
     "nextStartDate === currentHabit.startDate",
-    "previewSchedule({ startDate: nextStartDate });",
     'runDetailAction("start-date"',
+    "await updateHabit(habitId, {",
   ],
   "start-date confirm must reject stale/archived/no-op input before optimistic state and persistence",
 );
@@ -415,12 +415,12 @@ assertSourceOrder(
 );
 assert.match(
   repeatProductApply,
-  /if \(succeeded \|\| !isLatest\)[\s\S]{0,100}clearSchedulePreview\(\);[\s\S]{0,80}reload\(true\)/,
+  /if \(succeeded \|\| !isLatest\)[\s\S]{0,100}reload\(true\)/,
   "repeat persistence failure must retain the existing rollback and authoritative reload",
 );
 assert.match(
   startDateProductApply,
-  /if \(succeeded \|\| !isLatest\)[\s\S]{0,100}clearSchedulePreview\(\);[\s\S]{0,80}reload\(true\)/,
+  /if \(succeeded \|\| !isLatest\)[\s\S]{0,100}reload\(true\)/,
   "start-date persistence failure must retain the existing rollback and authoritative reload",
 );
 assert.match(
@@ -698,17 +698,13 @@ function auditCivilDateConfirmation(route: string, controller: string): void {
       {
         habitRef,
         habitId: 41,
-        previewSchedule: (patch: { startDate: string }) => {
-          effects.push("preview");
-          projected.push(patch.startDate);
-        },
         updateHabit: async (_id: number, patch: Record<string, unknown>) => {
-          effects.push("persist");
+          effects.push("apply");
+          projected.push(patch.startDate as string);
           persisted.push(patch);
         },
         runDetailAction: (_name: string, operation: () => Promise<void>) =>
           operation().then(() => ({ succeeded: true, isLatest: true })),
-        clearSchedulePreview: () => {},
         reload: () => {},
       },
     );
@@ -739,8 +735,8 @@ function auditCivilDateConfirmation(route: string, controller: string): void {
     confirm(date);
     assert.deepEqual(
       effects,
-      ["close", "preview", "persist"],
-      "a date confirmation must dismiss its owner before synchronous preview and persistence",
+      ["close", "apply"],
+      "a date confirmation must dismiss its owner before the shared optimistic command",
     );
     assert.deepEqual(
       projected,

@@ -1,6 +1,6 @@
 {
   "name": "cherishfire",
-  "version": "1.5.116",
+  "version": "1.5.117",
   "description": "Local-first Expo habit tracker with multi-state completion, notes, reminders, and rich statistics.",
   "main": "expo-router/entry",
   "license": "MIT",

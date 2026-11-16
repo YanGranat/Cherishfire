@@ -8,16 +8,14 @@ import {
   waitForPendingHabitWritesThrough,
 } from "../src/application/habits/habit-write-fence";
 import { loadHabitStoreForAudit } from "./fixtures/load-habit-store-for-audit";
-import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-audit";
 
 const date = "2002-05-14";
 const sourcePath = resolve("src/stores/habit-store.ts");
-const detailPath = resolve("src/features/habit-detail/hooks/useHabitDetail.ts");
 const mutation = process.argv.find(argument => argument.startsWith("--mutation="))?.slice(11);
 const knownMutations = new Set([
   "ack-sql-id", "ack-created-at", "ack-updated-at", "ack-ownership",
   "prune-negative-id", "restore-noop-publication", "restore-noop-invalidation",
-  "restore-superseded-error", "detail-sql-id",
+  "restore-superseded-error",
 ]);
 assert.ok(!mutation || knownMutations.has(mutation), "the selected mutation must be known");
 
@@ -38,11 +36,11 @@ function transformStore(source: string): string {
   if (mutation === "ack-updated-at") return replaceOnce(source,
     " &&\n        optimisticRecord.updatedAt === persisted.updatedAt;", ";");
   if (mutation === "ack-ownership") return replaceOnce(source,
-    "      if (!isLatestDayMutation(overlayKey, mutationId)) return true;\n      invalidatePendingDayRecordReads();\n      dayRecordOverlays.set(overlayKey, persisted);",
-    "      invalidatePendingDayRecordReads();\n      dayRecordOverlays.set(overlayKey, persisted);");
+    "      if (!isLatestDayMutation(overlayKey, mutationId)) return true;\n      const currentHabit = get().habits.find(",
+    "      const currentHabit = get().habits.find(");
   if (mutation === "prune-negative-id") return replaceOnce(source,
-    "!(record.habitId === id && removedRecordDates.has(record.date));",
-    "record.id < 0 || !(record.habitId === id && removedRecordDates.has(record.date));");
+    "record.habitId !== id || !removedDates.has(record.date);",
+    "record.id < 0 || record.habitId !== id || !removedDates.has(record.date);");
   if (mutation === "restore-noop-publication") return replaceOnce(source,
     "        if (habits === state.habits && allHabits === state.allHabits) {\n          return state;\n        }\n", "");
   if (mutation === "restore-noop-invalidation") return replaceOnce(source,
@@ -232,7 +230,10 @@ async function schedulePruning(): Promise<void> {
   const store = loaded.storeModule.useHabitStore;
   assert.equal(await store.getState().markDay(1, date, "done"), true);
   assert.ok(store.getState().allDayRecords[0].id < 0);
-  await store.getState().updateHabit(1, { startDate: "2003-01-01" });
+  const schedule = store.getState().updateHabit(1, { startDate: "2003-01-01" });
+  assert.equal(store.getState().allDayRecords.length, 0,
+    "logical pruning must include optimistic identities in its first projection");
+  await schedule;
   assert.equal(loaded.persistence.snapshotRecords().length, 0);
   assert.equal(store.getState().allDayRecords.length, 0, "schedule pruning must use the logical record key");
   assert.equal(store.getState().dayRecordsByDate[date]?.length ?? 0, 0);
@@ -367,28 +368,8 @@ async function restoreFailure(): Promise<void> {
   assert.equal(store.getState().error, "Restore rejected", "an owned restore failure must remain visible");
 }
 
-function detailEquality(): void {
-  let source = readFileSync(detailPath, "utf8");
-  if (mutation === "detail-sql-id") {
-    source = replaceOnce(source, "[`${record.habitId}|${record.date}`, record]", "[record.id, record]");
-    source = replaceOnce(source, "rightByKey.get(`${record.habitId}|${record.date}`)", "rightByKey.get(record.id)");
-  }
-  const equals = loadSourceCallableForAudit<(a: DayRecord[], b: DayRecord[]) => boolean>(
-    source, "dayRecordsHaveSameVisibleState", {},
-  );
-  const record: DayRecord = { id: -1, habitId: 1, date, status: "done", createdAt: 1, updatedAt: 2 };
-  assert.equal(equals([record], [{ ...record, id: 10 }]), true,
-    "detail equality must ignore SQL identity for the same logical payload");
-  for (const changed of [{ habitId: 2 }, { date: "2002-05-15" }, { status: "minimum" as const },
-    { createdAt: 2 }, { updatedAt: 3 }]) {
-    assert.equal(equals([record], [{ ...record, ...changed }]), false,
-      "detail equality must preserve every logical payload field");
-  }
-}
-
 async function run(): Promise<void> {
   assert.ok(readFileSync(sourcePath, "utf8").includes("const optimisticMatchesPersisted"));
-  detailEquality();
   await equalAcknowledgement();
   await changedPayload("createdAt");
   await changedPayload("updatedAt");

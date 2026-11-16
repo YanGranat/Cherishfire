@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { withAuditDeadline } from "./fixtures/with-audit-deadline";
 import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -391,6 +392,7 @@ async function main(): Promise<void> {
     {
       encoding: "utf8",
       maxBuffer: 32 * 1024 * 1024,
+      timeout: 60_000,
     },
   );
   if (result.error) throw result.error;
@@ -449,7 +451,7 @@ async function main(): Promise<void> {
   );
 }
 
-void main().catch((error: unknown) => {
+void withAuditDeadline(main, "Production dependency audit", 90_000).catch((error: unknown) => {
   console.error(error);
   process.exitCode = 1;
 });

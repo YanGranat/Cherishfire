@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { withAuditDeadline } from "./fixtures/with-audit-deadline";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -1189,11 +1190,22 @@ function auditOwnership(): void {
     "InlineDescription must reach persistence only through composition/application",
   );
   assert.doesNotMatch(inlineDescription, /@\/data\/|@\/db\/|runtimeDb/);
-  assert.match(
-    habitStore,
-    /await habitPersistence\.deleteHabits\(deletedIdList\);[\s\S]{0,100}invalidateNotesProjection\(id, \{ kind: "habit-deleted" \}\);[\s\S]{0,100}publishDeletedHabitDescriptionLines\(deletedIds\);/,
-    "habit deletion must publish cache cleanup only after its atomic row deletion commits",
+  let deletionBoundary = habitStore.indexOf(
+    "await habitPersistence.deleteHabits(deletedIdList);",
   );
+  assert.ok(deletionBoundary >= 0, "habit deletion must await its atomic row commit");
+  for (const publication of [
+    "forgetHabitScheduleWriteRevisions(deletedIdList);",
+    'invalidateNotesProjection(id, { kind: "habit-deleted" });',
+    "publishDeletedHabitDescriptionLines(deletedIds);",
+  ]) {
+    const position = habitStore.indexOf(publication, deletionBoundary);
+    assert.ok(
+      position > deletionBoundary,
+      "habit deletion must publish cache cleanup only after its atomic row deletion commits",
+    );
+    deletionBoundary = position;
+  }
   assert.match(
     store,
     /const habitDescriptionLines = parsePersistedDescriptionLines\(rows\);[\s\S]{0,8000}createSettingsMutationSnapshot\([\s\S]{0,100}loadedSettings,[\s\S]{0,100}habitDescriptionLines/,
@@ -1333,4 +1345,7 @@ async function main(): Promise<void> {
   console.log("Settings mutation coordinator audit passed.");
 }
 
-void main();
+void withAuditDeadline(main, "Settings mutation coordinator audit").catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

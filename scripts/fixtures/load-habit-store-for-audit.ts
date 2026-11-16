@@ -354,11 +354,11 @@ export class AuditHabitPersistence {
     });
     const { schedule: _ignoredSchedule, ...patch } = input.patch;
     if (!plan.changed) {
-      if (!input.isCurrent()) return { kind: "unchanged" };
+      if (!input.isCurrent()) return { kind: "unchanged", habit: cloneHabit(existing), records: habitRecords };
       this.habits[index] = { ...existing, ...patch };
-      return { kind: "unchanged" };
+      return { kind: "unchanged", habit: cloneHabit(this.habits[index]), records: habitRecords };
     }
-    if (!input.isCurrent()) return { kind: "unchanged" };
+    if (!input.isCurrent()) return { kind: "unchanged", habit: cloneHabit(existing), records: habitRecords };
     const removedRecordIds = plan.removedRecords.map((record) => record.id);
     const removedIdSet = new Set(removedRecordIds);
     this.records = this.records.filter(
@@ -375,6 +375,7 @@ export class AuditHabitPersistence {
     return {
       kind: "updated",
       habit: cloneHabit(persisted),
+      records: plan.keptRecords,
       removedRecordIds,
       removedRecordDates: [
         ...new Set(plan.removedRecords.map((record) => record.date)),

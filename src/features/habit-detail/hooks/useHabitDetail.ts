@@ -10,34 +10,8 @@ import {
   getHabitDayRecordsForState,
   useHabitStore,
 } from "@/stores/habit-store";
-import type { Habit, DayRecord, DayStatus } from "@/types/habit";
+import type { Habit, DayRecord } from "@/types/habit";
 import { useCurrentLocalDate } from "@/hooks/useCurrentLocalDate";
-import { planHabitScheduleEdit } from "@/domain/habits/schedule-edit";
-interface LocalSchedulePreview {
-  habit: Habit;
-  records: DayRecord[];
-}
-function dayRecordsHaveSameVisibleState(
-  left: readonly DayRecord[],
-  right: readonly DayRecord[],
-): boolean {
-  if (left === right) return true;
-  if (left.length !== right.length) return false;
-  const rightByKey = new Map(
-    right.map((record) => [`${record.habitId}|${record.date}`, record]),
-  );
-  return left.every((record) => {
-    const other = rightByKey.get(`${record.habitId}|${record.date}`);
-    return (
-      other != null &&
-      other.habitId === record.habitId &&
-      other.date === record.date &&
-      other.status === record.status &&
-      other.createdAt === record.createdAt &&
-      other.updatedAt === record.updatedAt
-    );
-  });
-}
 function habitsHaveSameVisibleState(
   left: Habit | null,
   right: Habit | null,
@@ -113,12 +87,9 @@ export function useHabitDetail(habitId: number) {
   const storedRecords =
     authoritativeRecords ??
     (allDayRecordsLoaded ? cachedHabitRecords : fallbackRecords);
-  const [schedulePreview, setSchedulePreview] =
-    useState<LocalSchedulePreview | null>(null);
-  const schedulePreviewRef = useRef(schedulePreview);
-  schedulePreviewRef.current = schedulePreview;
-  const habit = schedulePreview?.habit ?? storedHabit;
-  const records = schedulePreview?.records ?? storedRecords;
+  const habit =
+    authoritativeRecords != null ? storedHabit : (cachedHabit ?? storedHabit);
+  const records = storedRecords;
   const [isLoading, setIsLoading] = useState(
     cachedHabit == null || !allDayRecordsLoaded,
   );
@@ -217,6 +188,7 @@ export function useHabitDetail(habitId: number) {
         } else {
           setStoredHabit(null);
           setFallbackRecords([]);
+          setAuthoritativeRecords([]);
           setResolvedContentHabitId(habitId);
           return;
         }
@@ -241,29 +213,15 @@ export function useHabitDetail(habitId: number) {
     [habitId],
   );
   useEffect(() => {
-    // Keep the authoritative store snapshot current underneath a local
-    // schedule preview. Do not let an older cache acknowledgement replace a
-    // new repeat row while its matching calendar snapshot is still visible.
     setStoredHabit((current) =>
       habitsHaveSameVisibleState(current, cachedHabit) ? current : cachedHabit,
     );
-    const preview = schedulePreviewRef.current;
-    if (
-      !preview ||
-      !cachedHabit ||
-      !allDayRecordsLoaded ||
-      !habitsHaveSameVisibleState(cachedHabit, preview.habit) ||
-      !dayRecordsHaveSameVisibleState(cachedHabitRecords, preview.records)
-    ) {
-      return;
-    }
-    setSchedulePreview(null);
   }, [allDayRecordsLoaded, cachedHabit, cachedHabitRecords]);
   useEffect(() => {
     // A forced database snapshot is only a recovery bridge. As soon as the
     // global cache changes again, resume using it as the optimistic owner.
     setAuthoritativeRecords(null);
-  }, [cachedHabitRecords]);
+  }, [cachedHabit, cachedHabitRecords]);
   useEffect(() => {
     const state = useHabitStore.getState();
     const habitIsCached =
@@ -281,106 +239,7 @@ export function useHabitDetail(habitId: number) {
           })()
         : current,
     );
-    setSchedulePreview((current) =>
-      current
-        ? {
-            ...current,
-            habit: {
-              ...current.habit,
-              ...patch,
-              updatedAt: Date.now(),
-            },
-          }
-        : current,
-    );
   }, []);
-  const previewSchedule = useCallback(
-    (patch: {
-      repeatSchedule?: Habit["repeatSchedule"];
-      startDate?: string;
-    }) => {
-      const currentHabit = schedulePreviewRef.current?.habit ?? storedHabit;
-      const currentRecords =
-        schedulePreviewRef.current?.records ?? storedRecords;
-      if (!currentHabit) return false;
-      const plan = planHabitScheduleEdit({
-        previousSchedule: currentHabit.repeatSchedule,
-        previousStartDate: currentHabit.startDate,
-        previousHistory: currentHabit.scheduleHistory,
-        records: currentRecords,
-        nextSchedule: patch.repeatSchedule,
-        nextStartDate: patch.startDate,
-        today: todayDate,
-      });
-      if (!plan.changed) return false;
-      const nextPreview: LocalSchedulePreview = {
-        habit: {
-          ...currentHabit,
-          repeatSchedule: plan.repeatSchedule,
-          startDate: plan.startDate,
-          scheduleHistory: plan.scheduleHistory,
-          updatedAt: Date.now(),
-        },
-        records: plan.keptRecords,
-      };
-      schedulePreviewRef.current = nextPreview;
-      setSchedulePreview(nextPreview);
-      return true;
-    },
-    [storedHabit, storedRecords, todayDate],
-  );
-  const clearSchedulePreview = useCallback(() => {
-    schedulePreviewRef.current = null;
-    setSchedulePreview(null);
-  }, []);
-  const patchDayStatus = useCallback(
-    (date: string, status: DayStatus | null) => {
-      const updateRecords = (current: DayRecord[]) => {
-        const existing = current.find((record) => record.date === date);
-        if (status == null) {
-          return existing
-            ? current.filter((record) => record.date !== date)
-            : current;
-        }
-        const now = Date.now();
-        if (existing) {
-          if (existing.status === status) return current;
-          return current.map((record) =>
-            record.date === date
-              ? { ...record, status, updatedAt: now }
-              : record,
-          );
-        }
-        return [
-          ...current,
-          {
-            id: -now,
-            habitId,
-            date,
-            status,
-            createdAt: now,
-            updatedAt: now,
-          },
-        ];
-      };
-      if (schedulePreviewRef.current) {
-        setSchedulePreview((current) => {
-          if (!current) return current;
-          const next = { ...current, records: updateRecords(current.records) };
-          schedulePreviewRef.current = next;
-          return next;
-        });
-        return;
-      }
-      // Once the global record cache is loaded, markDay/unmarkDay is the sole
-      // optimistic owner and updates it synchronously before its first await.
-      // The fallback exists only for a directly opened detail screen whose
-      // global history has not loaded yet.
-      if (useHabitStore.getState().allDayRecordsLoaded) return;
-      setFallbackRecords(updateRecords);
-    },
-    [habitId],
-  );
   const repeatSchedule = habit?.repeatSchedule;
   const startDate = habit?.startDate;
   const archiveHistory = habit?.archiveHistory;
@@ -439,8 +298,5 @@ export function useHabitDetail(habitId: number) {
     error,
     reload,
     patchHabit,
-    previewSchedule,
-    clearSchedulePreview,
-    patchDayStatus,
   };
 }

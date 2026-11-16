@@ -79,10 +79,18 @@ export function buildUpcomingReminderDates(
     if (handledDates.has(isoDate)) continue;
     if (!isScheduled(isoDate)) continue;
 
-    for (const time of times) {
-      const triggerDate = new Date(day);
-      triggerDate.setHours(time.hour, time.minute, 0, 0);
-      if (triggerDate.getTime() <= now.getTime()) continue;
+    // Plan by actual trigger time, independently of the editor's row order.
+    // Local times in a daylight-saving gap can normalize into a later hour.
+    const dayDates = times
+      .map((time) => {
+        const triggerDate = new Date(day);
+        triggerDate.setHours(time.hour, time.minute, 0, 0);
+        return triggerDate;
+      })
+      .filter((date) => date.getTime() > now.getTime())
+      .sort((left, right) => left.getTime() - right.getTime());
+    for (const triggerDate of dayDates) {
+      if (dates[dates.length - 1]?.getTime() === triggerDate.getTime()) continue;
       dates.push(triggerDate);
       if (dates.length >= REMINDER_MAX_PER_HABIT) return dates;
     }

@@ -27,6 +27,7 @@ import type { Note } from "../src/types/note";
 import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-audit";
 import { loadHabitStoreForAudit } from "./fixtures/load-habit-store-for-audit";
 import { loadSqliteRepositoriesForAudit } from "./fixtures/load-sqlite-repositories-for-audit";
+import { auditNoteEditorLifecycle } from "./fixtures/audit-note-editor-lifecycle";
 interface Deferred<T> {
   readonly promise: Promise<T>;
   resolve(value: T): void;
@@ -1673,6 +1674,7 @@ async function main() {
     "the composition boundary must delegate the snapshot protocol to the application coordinator",
   );
   await auditExternalNotesWrites();
+  auditNoteEditorLifecycle();
   clearCachedNotes();
   console.log("Notes cache audit passed.");
 }

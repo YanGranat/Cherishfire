@@ -23,6 +23,7 @@ import type {
 import { areRepeatSchedulesEqual } from "@/types/habit";
 import { calculateCurrentStreak } from "@/domain/habits/streak";
 import { projectHabitDayRecordsForDate } from "@/domain/habits/day-record-projection";
+import { planHabitScheduleEdit } from "@/domain/habits/schedule-edit";
 import {
   scheduleHabitReminderAfterRecordChange,
   scheduleHabitRemindersSync,
@@ -68,9 +69,16 @@ import { canConsumeHabitStoreError } from "@/stores/habit-error-consumption";
 import {
   DiscardedHabitWriteError,
   captureHabitReadBarrier,
+  captureHabitScheduleWriteBarrier,
+  capturePredecessorHabitDataWrites,
+  forgetHabitScheduleWriteRevisions,
   getCurrentHabitWriteSequence,
   isHabitWriteProtectedByFence,
   isHabitReadBarrierCurrent,
+  isHabitScheduleWriteBarrierCurrent,
+  isHabitScheduleWriteRequired,
+  resetHabitScheduleWriteRevisions,
+  retainDestructiveHabitScheduleWrite,
   waitForHabitPersistenceTurn,
   withPendingHabitWriteTracking,
 } from "@/application/habits/habit-write-fence";
@@ -112,6 +120,7 @@ let dayRecordReadGeneration = 0;
 let hasBootstrappedInitialDayWindow = false;
 let allDayRecordsByDateCache: Record<string, DayRecord[]> = {};
 const dayRecordOverlays = new Map<string, DayRecord | null>();
+const schedulePruneOverlayOwners = new Map<string, number>();
 const DAY_RECORDS_WINDOW_RADIUS = 1;
 const INITIAL_DAY_RECORDS_WINDOW_RADIUS = 7;
 const EMPTY_DAY_RECORDS: DayRecord[] = [];
@@ -834,6 +843,8 @@ function shouldPersistHabitMutation(
 ): boolean {
   return (
     isLatestHabitMutation(ownership, scope) ||
+    (scope === "schedule" &&
+      isHabitScheduleWriteRequired(ownership.habitId, ownership.writeSequence)) ||
     (scope != null
       ? isHabitWriteProtectedByFence(
           ownership.writeSequence,
@@ -1944,7 +1955,8 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
     if (partitionedInput) {
       // Schedule edits can delete records. Give the destructive transaction and
       // ordinary editable fields independent ownership so a newer schedule tap
-      // can cancel only the stale schedule work without losing the other edit.
+      // can supersede unused non-destructive schedule work without losing the
+      // other edit.
       await Promise.all([
         get().updateHabit(id, partitionedInput.schedule),
         get().updateHabit(id, partitionedInput.editable),
@@ -1966,6 +1978,8 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
     let scheduleWasUpdated = false;
     let habitWasFound = true;
     let persistedHabit: Habit | null = null;
+    let persistedRecords: DayRecord[] = [];
+    let hasOptimisticSchedule = false;
     let removedRecordDates = new Set<string>();
     if (input.description !== undefined)
       updateData.description = input.description;
@@ -1979,6 +1993,33 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
       id,
       getUpdateHabitMutationScopes(input, changesSchedule),
     );
+    const predecessorWrites = changesSchedule
+      ? capturePredecessorHabitDataWrites(id)
+      : Promise.resolve();
+    const prunedOverlays = new Map<
+      string,
+      {
+        previous: DayRecord | null | undefined;
+        previousMutationId: number | undefined;
+      }
+    >();
+    const releasePrunedOverlays = (restorePending = false) => {
+      for (const [key, previous] of prunedOverlays) {
+        if (schedulePruneOverlayOwners.get(key) !== ownership.mutationId) continue;
+        schedulePruneOverlayOwners.delete(key);
+        if (dayRecordOverlays.get(key) !== null) continue;
+        if (
+          restorePending &&
+          previous.previous != null &&
+          previous.previousMutationId != null &&
+          isLatestDayMutation(key, previous.previousMutationId)
+        ) {
+          dayRecordOverlays.set(key, previous.previous);
+        } else {
+          dayRecordOverlays.delete(key);
+        }
+      }
+    };
     // A schedule transaction may delete failure/skip reason notes. Invalidate
     // before the transaction is queued so an older in-flight notes SELECT
     // cannot republish a pre-edit snapshot after the deletion commits.
@@ -2120,283 +2161,384 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
         throw error;
       }
     }
-    // Habit detail has already published the complete schedule preview. Keep
-    // its first correct frame ahead of the synchronous SQLite transaction.
-    await persistenceCommitScheduler.waitForCommitOpportunity();
-    if (!(await waitForHabitPersistenceTurn(ownership.writeSequence))) {
-      finishHabitMutation(ownership);
-      return;
-    }
-    if (!shouldPersistHabitMutation(ownership, "schedule")) {
-      finishHabitMutation(ownership);
-      return;
-    }
-    try {
-      const persistableScheduleRowPatch =
-        selectPersistableHabitUpdatePatch(updateData, (scope) =>
-          shouldPersistHabitMutation(ownership, scope),
-        ) ?? {};
-      const result = await habitPersistence.persistScheduleEdit({
-        habitId: id,
-        patch: persistableScheduleRowPatch,
-        nextRepeatSchedule: input.repeatSchedule,
+    const previewState = get();
+    const previewHabit =
+      previewState.allHabits.find((habit) => habit.id === id) ??
+      previewState.habits.find((habit) => habit.id === id);
+    if (previewHabit) {
+      const plan = planHabitScheduleEdit({
+        previousSchedule: previewHabit.repeatSchedule,
+        previousStartDate: previewHabit.startDate,
+        previousHistory: previewHabit.scheduleHistory,
+        records: getHabitDayRecordsForState(previewState, id),
+        nextSchedule: input.repeatSchedule,
         nextStartDate: input.startDate,
         today: format(now, "yyyy-MM-dd"),
-        isCurrent: () => shouldPersistHabitMutation(ownership, "schedule"),
       });
-      habitWasFound = result.kind !== "missing";
-      scheduleWasUpdated = result.kind === "updated";
-      if (result.kind === "updated") {
-        persistedHabit = result.habit;
-        removedRecordDates = new Set(result.removedRecordDates);
-        if (removedRecordDates.size > 0) {
-          invalidateNotesProjection(id, {
-            kind: "reason-notes-removed",
-            dates: result.removedRecordDates,
-          });
+      if (plan.changed) {
+        hasOptimisticSchedule = true;
+        const removedDates = new Set(
+          plan.removedRecords.map((record) => record.date),
+        );
+        if (removedDates.size > 0 || !previewState.allDayRecordsLoaded) {
+          retainDestructiveHabitScheduleWrite(ownership.writeSequence);
         }
+        for (const date of removedDates) {
+          const key = dayRecordOverlayKey(id, date);
+          prunedOverlays.set(key, {
+            previous: dayRecordOverlays.get(key),
+            previousMutationId: latestDayMutationIds.get(key)?.mutationId,
+          });
+          dayRecordOverlays.set(key, null);
+          schedulePruneOverlayOwners.set(key, ownership.mutationId);
+        }
+        const keepRecord = (record: DayRecord) =>
+          record.habitId !== id || !removedDates.has(record.date);
+        invalidatePendingDayRecordReads();
+        invalidateViewModelCachesForChange("schedule");
+        for (const [date, records] of Object.entries(allDayRecordsByDateCache)) {
+          allDayRecordsByDateCache[date] = records.filter(keepRecord);
+        }
+        set((state) => {
+          const update = (habit: Habit) =>
+            applyOwnedHabitFields(habit, ownership, {
+              repeatSchedule: plan.repeatSchedule,
+              scheduleHistory: plan.scheduleHistory,
+              startDate: plan.startDate,
+              updatedAt: now.getTime(),
+            });
+          return {
+            habits: state.habits.map(update),
+            allHabits: state.allHabits.map(update),
+            allDayRecords: state.allDayRecords.filter(keepRecord),
+            dayRecords: state.dayRecords.filter(keepRecord),
+            dayRecordsByDate: Object.fromEntries(
+              Object.entries(state.dayRecordsByDate).map(([date, records]) => [
+                date,
+                records.filter(keepRecord),
+              ]),
+            ),
+          };
+        });
       }
-    } catch (error) {
-      if (error instanceof StaleHabitScheduleMutationError) {
+    }
+    // Every interactive consumer now observes the same complete schedule plan.
+    try {
+      await persistenceCommitScheduler.waitForCommitOpportunity();
+      await predecessorWrites;
+      if (!(await waitForHabitPersistenceTurn(ownership.writeSequence))) {
         finishHabitMutation(ownership);
         return;
       }
-      // A previous schedule transaction can commit after a newer optimistic
-      // schedule is already visible. If that newer transaction then fails,
-      // restore the actual committed row *and* its records as one store update.
-      // Re-check ownership after the reads so a newer intent wins.
-      if (isLatestHabitMutation(ownership, "schedule")) {
-        try {
-          const [authoritativeHabit, authoritativeRecords] = await Promise.all([
-            queryHabitModelById(id),
-            queryHabitDayRecordModels(id),
-          ]);
-          if (
-            authoritativeHabit &&
-            isLatestHabitMutation(ownership, "schedule")
-          ) {
-            invalidatePendingDayRecordReads();
-            const authoritativeByDate = new Map(
-              authoritativeRecords.map((record) => [record.date, record]),
-            );
-            for (const [date, records] of Object.entries(
-              allDayRecordsByDateCache,
-            )) {
-              allDayRecordsByDateCache[date] = replaceHabitRecordsForDate(
-                records,
-                id,
-                date,
-                authoritativeByDate,
+      if (!shouldPersistHabitMutation(ownership, "schedule")) {
+        finishHabitMutation(ownership);
+        return;
+      }
+      try {
+        const persistableScheduleRowPatch =
+          selectPersistableHabitUpdatePatch(updateData, (scope) =>
+            shouldPersistHabitMutation(ownership, scope),
+          ) ?? {};
+        const result = await habitPersistence.persistScheduleEdit({
+          habitId: id,
+          patch: persistableScheduleRowPatch,
+          nextRepeatSchedule: input.repeatSchedule,
+          nextStartDate: input.startDate,
+          today: format(now, "yyyy-MM-dd"),
+          isCurrent: () => shouldPersistHabitMutation(ownership, "schedule"),
+        });
+        habitWasFound = result.kind !== "missing";
+        scheduleWasUpdated =
+          result.kind === "updated" ||
+          (result.kind === "unchanged" && hasOptimisticSchedule);
+        if (result.kind !== "missing") {
+          persistedHabit = result.habit;
+          persistedRecords = result.records;
+        }
+        if (result.kind === "updated") {
+          removedRecordDates = new Set(result.removedRecordDates);
+          if (removedRecordDates.size > 0) {
+            invalidateNotesProjection(id, {
+              kind: "reason-notes-removed",
+              dates: result.removedRecordDates,
+            });
+          }
+        }
+      } catch (error) {
+        releasePrunedOverlays(true);
+        if (error instanceof StaleHabitScheduleMutationError) {
+          finishHabitMutation(ownership);
+          return;
+        }
+        // A previous schedule transaction can commit after a newer optimistic
+        // schedule is already visible. If that newer transaction then fails,
+        // restore the actual committed row *and* its records as one store update.
+        // Re-check ownership after the reads so a newer intent wins.
+        if (isLatestHabitMutation(ownership, "schedule")) {
+          try {
+            const [authoritativeHabit, authoritativeRecords] = await Promise.all([
+              queryHabitModelById(id),
+              queryHabitDayRecordModels(id),
+            ]);
+            if (
+              authoritativeHabit &&
+              isLatestHabitMutation(ownership, "schedule")
+            ) {
+              invalidatePendingDayRecordReads();
+              const authoritativeByDate = new Map(
+                authoritativeRecords.map((record) => [record.date, record]),
               );
-            }
-            invalidateViewModelCachesForChange("schedule");
-            let nextActiveHabits: Habit[] = [];
-            set((state) => {
-              const applyAuthoritativeFields = (habit: Habit): Habit =>
-                applyOwnedHabitFields(habit, ownership, authoritativeHabit);
-              nextActiveHabits = state.habits.map(applyAuthoritativeFields);
-              const nextDayRecordsByDate: Record<string, DayRecord[]> = {};
               for (const [date, records] of Object.entries(
-                state.dayRecordsByDate,
+                allDayRecordsByDateCache,
               )) {
-                nextDayRecordsByDate[date] = replaceHabitRecordsForDate(
+                allDayRecordsByDateCache[date] = replaceHabitRecordsForDate(
                   records,
                   id,
                   date,
                   authoritativeByDate,
                 );
               }
+              invalidateViewModelCachesForChange("schedule");
+              let nextActiveHabits: Habit[] = [];
+              set((state) => {
+                const applyAuthoritativeFields = (habit: Habit): Habit =>
+                  applyOwnedHabitFields(habit, ownership, authoritativeHabit);
+                nextActiveHabits = state.habits.map(applyAuthoritativeFields);
+                const nextDayRecordsByDate: Record<string, DayRecord[]> = {};
+                for (const [date, records] of Object.entries(
+                  state.dayRecordsByDate,
+                )) {
+                  nextDayRecordsByDate[date] = replaceHabitRecordsForDate(
+                    records,
+                    id,
+                    date,
+                    authoritativeByDate,
+                  );
+                }
+                return {
+                  habits: nextActiveHabits,
+                  allHabits: state.allHabits.map(applyAuthoritativeFields),
+                  allDayRecords: replaceAllHabitRecords(
+                    state.allDayRecords,
+                    id,
+                    authoritativeRecords,
+                  ),
+                  dayRecordsByDate: nextDayRecordsByDate,
+                  dayRecords: state.currentDayRecordsDate
+                    ? replaceHabitRecordsForDate(
+                        state.dayRecords,
+                        id,
+                        state.currentDayRecordsDate,
+                        authoritativeByDate,
+                      )
+                    : state.dayRecords,
+                  ...createHabitErrorUpdate(
+                    error instanceof Error
+                      ? error.message
+                      : "Failed to update habit",
+                  ),
+                };
+              });
+              scheduleHabitRemindersSync(nextActiveHabits);
+            }
+          } catch {}
+        }
+        finishHabitMutation(ownership);
+        throw error;
+      }
+      if (!habitWasFound) {
+        finishHabitMutation(ownership);
+        return;
+      }
+      if (scheduleWasUpdated) {
+        // The transaction callback assigns this value before this branch runs.
+        // TypeScript cannot follow assignments made inside the async callback,
+        // so keep the runtime null guard while restoring the declared union.
+        const nextHabit = persistedHabit as Habit | null;
+        if (!nextHabit) {
+          finishHabitMutation(ownership);
+          return;
+        }
+        const persistedValues: Partial<Habit> = {
+          repeatSchedule: nextHabit.repeatSchedule,
+          scheduleHistory: nextHabit.scheduleHistory,
+          startDate: nextHabit.startDate,
+          ...(input.description !== undefined
+            ? { description: nextHabit.description }
+            : null),
+          ...(input.descriptionVisible !== undefined
+            ? { descriptionVisible: nextHabit.descriptionVisible }
+            : null),
+          ...(input.reminderEnabled !== undefined
+            ? { reminderEnabled: nextHabit.reminderEnabled }
+            : null),
+          ...(input.reminderTime !== undefined
+            ? { reminderTime: nextHabit.reminderTime }
+            : null),
+          updatedAt: nextHabit.updatedAt,
+        };
+        // A newer repeat/start-date intent can already be visible while this
+        // transaction is finishing. Never publish the older schedule (or its
+        // record removals) over that newer intent.
+        if (!isLatestHabitMutation(ownership, "schedule")) {
+          const hasOwnedRowField = ownership.scopes.some(
+            (scope) =>
+              scope !== "schedule" &&
+              scope !== "metadata" &&
+              isLatestHabitMutation(ownership, scope),
+          );
+          if (hasOwnedRowField) {
+            set((state) => {
+              const nextHabits = state.habits.map((habit) =>
+                applyOwnedHabitFields(habit, ownership, persistedValues),
+              );
+              transitionHabitViewModelCaches(
+                state.habits,
+                nextHabits,
+                "metadata",
+              );
               return {
-                habits: nextActiveHabits,
-                allHabits: state.allHabits.map(applyAuthoritativeFields),
-                allDayRecords: replaceAllHabitRecords(
-                  state.allDayRecords,
-                  id,
-                  authoritativeRecords,
-                ),
-                dayRecordsByDate: nextDayRecordsByDate,
-                dayRecords: state.currentDayRecordsDate
-                  ? replaceHabitRecordsForDate(
-                      state.dayRecords,
-                      id,
-                      state.currentDayRecordsDate,
-                      authoritativeByDate,
-                    )
-                  : state.dayRecords,
-                ...createHabitErrorUpdate(
-                  error instanceof Error
-                    ? error.message
-                    : "Failed to update habit",
+                habits: nextHabits,
+                allHabits: state.allHabits.map((habit) =>
+                  applyOwnedHabitFields(habit, ownership, persistedValues),
                 ),
               };
             });
-            scheduleHabitRemindersSync(nextActiveHabits);
           }
-        } catch {}
-      }
-      finishHabitMutation(ownership);
-      throw error;
-    }
-    if (!habitWasFound) {
-      finishHabitMutation(ownership);
-      return;
-    }
-    if (scheduleWasUpdated) {
-      // The transaction callback assigns this value before this branch runs.
-      // TypeScript cannot follow assignments made inside the async callback,
-      // so keep the runtime null guard while restoring the declared union.
-      const nextHabit = persistedHabit as Habit | null;
-      if (!nextHabit) {
+          const shouldSyncReminder =
+            (input.reminderEnabled !== undefined &&
+              isLatestHabitMutation(ownership, "reminder-enabled")) ||
+            (input.reminderTime !== undefined &&
+              isLatestHabitMutation(ownership, "reminder-time"));
+          finishHabitMutation(ownership);
+          if (shouldSyncReminder) {
+            scheduleHabitRemindersSync(get().habits, {
+              requestPermission: requestsReminderPermission,
+            });
+          }
+          return;
+        }
+        const scheduleDayMutations = new Map<string, number>();
+        for (const date of removedRecordDates) {
+          const key = dayRecordOverlayKey(id, date);
+          if (
+            (latestDayMutationIds.get(key)?.writeSequence ?? 0) >
+            ownership.writeSequence
+          ) {
+            removedRecordDates.delete(date);
+            continue;
+          }
+          const mutation = beginDayMutation(id, date, ownership.writeSequence);
+          scheduleDayMutations.set(mutation.key, mutation.mutationId);
+          dayRecordOverlays.set(mutation.key, null);
+        }
+        if (removedRecordDates.size > 0) invalidatePendingDayRecordReads();
+        releasePrunedOverlays();
+        invalidateViewModelCachesForChange("schedule");
+        const persistedByDate = new Map(
+          persistedRecords.map((record) => [record.date, record]),
+        );
+        let nextActiveHabits: Habit[] = [];
+        set((state) => {
+          const nextAllDayRecords = replaceAllHabitRecords(
+            state.allDayRecords,
+            id,
+            persistedRecords,
+          );
+          const nextDayRecordsByDate: Record<string, DayRecord[]> = {};
+          for (const [date, records] of Object.entries(state.dayRecordsByDate)) {
+            nextDayRecordsByDate[date] = replaceHabitRecordsForDate(
+              records,
+              id,
+              date,
+              persistedByDate,
+            );
+          }
+          for (const [date, records] of Object.entries(
+            allDayRecordsByDateCache,
+          )) {
+            allDayRecordsByDateCache[date] = replaceHabitRecordsForDate(
+              records,
+              id,
+              date,
+              persistedByDate,
+            );
+          }
+          const applyScheduleOwnedFields = (habit: Habit): Habit =>
+            applyOwnedHabitFields(habit, ownership, persistedValues);
+          nextActiveHabits = state.habits.map(applyScheduleOwnedFields);
+          return {
+            habits: nextActiveHabits,
+            allHabits: state.allHabits.map(applyScheduleOwnedFields),
+            allDayRecords: nextAllDayRecords,
+            dayRecordsByDate: nextDayRecordsByDate,
+            dayRecords: state.currentDayRecordsDate
+              ? replaceHabitRecordsForDate(
+                  state.dayRecords,
+                  id,
+                  state.currentDayRecordsDate,
+                  persistedByDate,
+                )
+              : state.dayRecords,
+          };
+        });
+        for (const date of removedRecordDates) {
+          const key = dayRecordOverlayKey(id, date);
+          dayRecordOverlays.delete(key);
+          const mutationId = scheduleDayMutations.get(key);
+          if (mutationId != null) finishDayMutation(key, mutationId);
+        }
         finishHabitMutation(ownership);
+        scheduleHabitRemindersSync(nextActiveHabits);
         return;
       }
+      // A schedule edit can be a semantic no-op while the same save also changes
+      // a reminder or description. Reflect those row fields without reloading
+      // the whole database.
+      let nextActiveHabits = get().habits;
       const persistedValues: Partial<Habit> = {
-        repeatSchedule: nextHabit.repeatSchedule,
-        scheduleHistory: nextHabit.scheduleHistory,
-        startDate: nextHabit.startDate,
         ...(input.description !== undefined
-          ? { description: nextHabit.description }
+          ? { description: input.description }
           : null),
         ...(input.descriptionVisible !== undefined
-          ? { descriptionVisible: nextHabit.descriptionVisible }
+          ? { descriptionVisible: input.descriptionVisible }
           : null),
         ...(input.reminderEnabled !== undefined
-          ? { reminderEnabled: nextHabit.reminderEnabled }
+          ? { reminderEnabled: input.reminderEnabled }
           : null),
         ...(input.reminderTime !== undefined
-          ? { reminderTime: nextHabit.reminderTime }
+          ? { reminderTime: input.reminderTime }
           : null),
-        updatedAt: nextHabit.updatedAt,
+        updatedAt: now.getTime(),
       };
-      // A newer repeat/start-date intent can already be visible while this
-      // transaction is finishing. Never publish the older schedule (or its
-      // record removals) over that newer intent.
-      if (!isLatestHabitMutation(ownership, "schedule")) {
-        const hasOwnedRowField = ownership.scopes.some(
-          (scope) =>
-            scope !== "schedule" &&
-            scope !== "metadata" &&
-            isLatestHabitMutation(ownership, scope),
-        );
-        if (hasOwnedRowField) {
-          set((state) => {
-            const nextHabits = state.habits.map((habit) =>
-              applyOwnedHabitFields(habit, ownership, persistedValues),
-            );
-            transitionHabitViewModelCaches(
-              state.habits,
-              nextHabits,
-              "metadata",
-            );
-            return {
-              habits: nextHabits,
-              allHabits: state.allHabits.map((habit) =>
-                applyOwnedHabitFields(habit, ownership, persistedValues),
-              ),
-            };
-          });
-        }
-        const shouldSyncReminder =
-          (input.reminderEnabled !== undefined &&
-            isLatestHabitMutation(ownership, "reminder-enabled")) ||
-          (input.reminderTime !== undefined &&
-            isLatestHabitMutation(ownership, "reminder-time"));
-        finishHabitMutation(ownership);
-        if (shouldSyncReminder) {
-          scheduleHabitRemindersSync(get().habits, {
-            requestPermission: requestsReminderPermission,
-          });
-        }
-        return;
-      }
-      const scheduleDayMutations = new Map<string, number>();
-      for (const date of removedRecordDates) {
-        const mutation = beginDayMutation(id, date, ownership.writeSequence);
-        scheduleDayMutations.set(mutation.key, mutation.mutationId);
-        dayRecordOverlays.set(mutation.key, null);
-      }
-      if (removedRecordDates.size > 0) invalidatePendingDayRecordReads();
-      invalidateViewModelCachesForChange("schedule");
-      let nextActiveHabits: Habit[] = [];
+      const applyRowFields = (habit: Habit): Habit =>
+        applyOwnedHabitFields(habit, ownership, persistedValues);
       set((state) => {
-        const keepRecord = (record: DayRecord) =>
-          !(record.habitId === id && removedRecordDates.has(record.date));
-        const nextAllDayRecords = state.allDayRecords.filter(keepRecord);
-        const nextDayRecordsByDate: Record<string, DayRecord[]> = {};
-        for (const [date, records] of Object.entries(state.dayRecordsByDate)) {
-          const filtered = records.filter(keepRecord);
-          nextDayRecordsByDate[date] = filtered;
-        }
-        for (const [date, records] of Object.entries(
-          allDayRecordsByDateCache,
-        )) {
-          allDayRecordsByDateCache[date] = records.filter(keepRecord);
-        }
-        const applyScheduleOwnedFields = (habit: Habit): Habit =>
-          applyOwnedHabitFields(habit, ownership, persistedValues);
-        nextActiveHabits = state.habits.map(applyScheduleOwnedFields);
+        nextActiveHabits = state.habits.map(applyRowFields);
+        transitionHabitViewModelCaches(
+          state.habits,
+          nextActiveHabits,
+          "metadata",
+        );
         return {
           habits: nextActiveHabits,
-          allHabits: state.allHabits.map(applyScheduleOwnedFields),
-          allDayRecords: nextAllDayRecords,
-          dayRecordsByDate: nextDayRecordsByDate,
-          dayRecords: state.dayRecords.filter(keepRecord),
+          allHabits: state.allHabits.map(applyRowFields),
         };
       });
-      for (const date of removedRecordDates) {
-        const key = dayRecordOverlayKey(id, date);
-        dayRecordOverlays.delete(key);
-        const mutationId = scheduleDayMutations.get(key);
-        if (mutationId != null) finishDayMutation(key, mutationId);
-      }
+      const shouldSyncReminder =
+        changesReminder &&
+        ((input.reminderEnabled !== undefined &&
+          isLatestHabitMutation(ownership, "reminder-enabled")) ||
+          (input.reminderTime !== undefined &&
+            isLatestHabitMutation(ownership, "reminder-time")));
       finishHabitMutation(ownership);
-      scheduleHabitRemindersSync(nextActiveHabits);
-      return;
-    }
-    // A schedule edit can be a semantic no-op while the same save also changes
-    // a reminder or description. Reflect those row fields without reloading
-    // the whole database.
-    let nextActiveHabits = get().habits;
-    const persistedValues: Partial<Habit> = {
-      ...(input.description !== undefined
-        ? { description: input.description }
-        : null),
-      ...(input.descriptionVisible !== undefined
-        ? { descriptionVisible: input.descriptionVisible }
-        : null),
-      ...(input.reminderEnabled !== undefined
-        ? { reminderEnabled: input.reminderEnabled }
-        : null),
-      ...(input.reminderTime !== undefined
-        ? { reminderTime: input.reminderTime }
-        : null),
-      updatedAt: now.getTime(),
-    };
-    const applyRowFields = (habit: Habit): Habit =>
-      applyOwnedHabitFields(habit, ownership, persistedValues);
-    set((state) => {
-      nextActiveHabits = state.habits.map(applyRowFields);
-      transitionHabitViewModelCaches(
-        state.habits,
-        nextActiveHabits,
-        "metadata",
-      );
-      return {
-        habits: nextActiveHabits,
-        allHabits: state.allHabits.map(applyRowFields),
-      };
-    });
-    const shouldSyncReminder =
-      changesReminder &&
-      ((input.reminderEnabled !== undefined &&
-        isLatestHabitMutation(ownership, "reminder-enabled")) ||
-        (input.reminderTime !== undefined &&
-          isLatestHabitMutation(ownership, "reminder-time")));
-    finishHabitMutation(ownership);
-    if (shouldSyncReminder) {
-      scheduleHabitRemindersSync(nextActiveHabits, {
-        requestPermission: requestsReminderPermission,
-      });
+      if (shouldSyncReminder) {
+        scheduleHabitRemindersSync(nextActiveHabits, {
+          requestPermission: requestsReminderPermission,
+        });
+      }
+    } finally {
+      releasePrunedOverlays();
     }
   },
   async renameHabit(id, name) {
@@ -3068,6 +3210,7 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
     try {
       const deletedIdList = [...deletedIds];
       await habitPersistence.deleteHabits(deletedIdList);
+      forgetHabitScheduleWriteRevisions(deletedIdList);
       for (const id of deletedIds) {
         invalidateNotesProjection(id, { kind: "habit-deleted" });
       }
@@ -3207,6 +3350,7 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
     if (habitId <= 0 || pendingHabitDeletionIds.has(habitId)) return false;
     if (date > format(new Date(), "yyyy-MM-dd")) return false;
     const stateBefore = get();
+    const scheduleBarrier = captureHabitScheduleWriteBarrier(habitId);
     const habit = ensureHabitByIdMap(stateBefore.habits).get(habitId);
     if (!habit) return false;
     if (!isHabitTrackingActiveOnDate(habit, date)) return false;
@@ -3315,6 +3459,7 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
         };
       }))();
     await persistenceCommitScheduler.waitForCommitOpportunity();
+    await scheduleBarrier.settled;
     if (!(await waitForHabitPersistenceTurn(writeSequence))) {
       if (isLatestDayMutation(overlayKey, mutationId)) {
         dayRecordOverlays.delete(overlayKey);
@@ -3337,9 +3482,32 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
         status,
         reason: reasonText ?? undefined,
         now: nowTs,
+        validateSchedule:
+          scheduleBarrier.hasPendingWrites ||
+          !isHabitScheduleWriteBarrierCurrent(scheduleBarrier),
       });
       if (reasonText != null) invalidateNotesProjection(habitId);
       if (!isLatestDayMutation(overlayKey, mutationId)) return true;
+      const currentHabit = get().habits.find(
+        (candidate) => candidate.id === habitId,
+      );
+      if (
+        currentHabit &&
+        (!isHabitTrackingActiveOnDate(currentHabit, date) ||
+          !isHabitScheduledForDate(
+            currentHabit.repeatSchedule,
+            currentHabit.startDate,
+            date,
+            getHabitDayRecordsForState(get(), habitId),
+            currentHabit.scheduleHistory,
+          ))
+      ) {
+        if (dayRecordOverlays.get(overlayKey) !== null) {
+          dayRecordOverlays.delete(overlayKey);
+        }
+        finishDayMutation(overlayKey, mutationId);
+        return true;
+      }
       invalidatePendingDayRecordReads();
       dayRecordOverlays.set(overlayKey, persisted);
       const optimisticMatchesPersisted =
@@ -3458,6 +3626,7 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
   async unmarkDay(habitId, date) {
     if (habitId <= 0 || pendingHabitDeletionIds.has(habitId)) return false;
     const stateBefore = get();
+    const scheduleBarrier = captureHabitScheduleWriteBarrier(habitId);
     const habit = ensureHabitByIdMap(stateBefore.habits).get(habitId);
     if (!habit || !isHabitTrackingActiveOnDate(habit, date)) return false;
     if (
@@ -3534,6 +3703,7 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
         };
       }))();
     await persistenceCommitScheduler.waitForCommitOpportunity();
+    await scheduleBarrier.settled;
     if (!(await waitForHabitPersistenceTurn(writeSequence))) {
       if (isLatestDayMutation(overlayKey, mutationId)) {
         dayRecordOverlays.delete(overlayKey);
@@ -3584,6 +3754,8 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
     deletedHabitTombstones.clear();
     latestHabitMutationIds.clear();
     latestDayMutationIds.clear();
+    schedulePruneOverlayOwners.clear();
+    resetHabitScheduleWriteRevisions();
     habitsLoadInFlight = null;
     allDayRecordsLoadInFlight = null;
     resetDerivedCaches();
@@ -3634,7 +3806,14 @@ export const useHabitStore = create<HabitStore>((set, get) => ({
 const habitActions = useHabitStore.getState();
 useHabitStore.setState({
   createHabit: withPendingHabitWriteTracking(habitActions.createHabit),
-  updateHabit: withPendingHabitWriteTracking(habitActions.updateHabit),
+  updateHabit: withPendingHabitWriteTracking(
+    habitActions.updateHabit,
+    (id, input) =>
+      (input.repeatSchedule !== undefined || input.startDate !== undefined) &&
+      !partitionMixedHabitUpdateInput(input)
+        ? id
+        : null,
+  ),
   renameHabit: withPendingHabitWriteTracking(habitActions.renameHabit),
   reorderHabits: withPendingHabitWriteTracking(habitActions.reorderHabits),
   archiveHabit: withPendingHabitWriteTracking(habitActions.archiveHabit),
@@ -3642,6 +3821,14 @@ useHabitStore.setState({
   restoreHabits: withPendingHabitWriteTracking(habitActions.restoreHabits),
   deleteHabit: withPendingHabitWriteTracking(habitActions.deleteHabit),
   deleteHabits: withPendingHabitWriteTracking(habitActions.deleteHabits),
-  markDay: withPendingHabitWriteTracking(habitActions.markDay),
-  unmarkDay: withPendingHabitWriteTracking(habitActions.unmarkDay),
+  markDay: withPendingHabitWriteTracking(
+    habitActions.markDay,
+    undefined,
+    (habitId) => habitId,
+  ),
+  unmarkDay: withPendingHabitWriteTracking(
+    habitActions.unmarkDay,
+    undefined,
+    (habitId) => habitId,
+  ),
 });

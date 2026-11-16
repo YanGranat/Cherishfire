@@ -1516,11 +1516,11 @@ const repeatNoopIndex = habitDetailRepeatApply.indexOf(
   "areRepeatSchedulesEqual(currentHabit.repeatSchedule, schedule)",
 );
 const repeatPatchIndex = habitDetailRepeatApply.indexOf(
-  "previewSchedule({ repeatSchedule: schedule });",
+  'runDetailAction("repeat"',
   repeatNoopIndex,
 );
 const repeatPersistenceIndex = habitDetailRepeatApply.indexOf(
-  'runDetailAction("repeat"',
+  "await updateHabit(habitId, {",
   repeatPatchIndex,
 );
 assert.ok(
@@ -3169,12 +3169,12 @@ assert.match(
 );
 assert.match(
   notesScreen,
-  /previousEditor && previousEditor\.noteId !== noteId[\s\S]{0,180}editorHandoffInProgressRef\.current = true[\s\S]{0,180}if \(!previousEditor\.saveDraft\(\)\) return false[\s\S]{0,180}editorHandoffInProgressRef\.current = false/,
+  /previousDraft && previousDraft\.noteId !== noteId[\s\S]{0,180}editorHandoffInProgressRef\.current = true[\s\S]{0,180}if \(!previousEditor\.saveDraft\(\)\) return false[\s\S]{0,1000}finally \{\s*editorHandoffInProgressRef\.current = false/,
   "opening another editor must synchronously save the current draft or block the handoff",
 );
 assert.match(
   notesScreen,
-  /activeEditorSaveRef\.current = \{ noteId, saveDraft \}/,
+  /activeEditorSaveRef\.current = \{ noteId, saveDraft, owner \}/,
 );
 assert.match(
   notesScreen,
@@ -3452,13 +3452,13 @@ assert.deepEqual(
 const noteCard = read("src/features/notes/components/NoteCard.tsx");
 assert.match(
   noteCard,
-  /const onEditingChangeRef = useRef\(onEditingChange\);\s*onEditingChangeRef\.current = onEditingChange;/,
-  "the note editor must keep the current parent callback in a ref",
+  /const onEditorUnmountRef = useRef\(onEditorUnmount\);\s*onEditorUnmountRef\.current = onEditorUnmount;/,
+  "the note editor must keep the current native-row detach callback in a ref",
 );
 assert.match(
   noteCard,
-  /useEffect\(\(\) => \{\s*return \(\) => \{[\s\S]{0,180}if \(editingRef\.current\) onEditingChangeRef\.current\?\.\(note\.id, false\);[\s\S]{0,80}\};\s*\}, \[note\.id\]\);/,
-  "changing a parent callback identity must never deactivate a note editor",
+  /useEffect\(\(\) => \{\s*return \(\) => \{[\s\S]{0,180}onEditorUnmountRef\.current\?\.\(note\.id, note\.clientMutationId, editorOwner\);[\s\S]{0,80}\};\s*\}, \[editorOwner, note\.clientMutationId, note\.id\]\);/,
+  "native row cleanup must detach without finishing its logical editor draft",
 );
 assert.equal(
   (
@@ -3473,7 +3473,7 @@ assert.match(
   noteCard,
   /const ACTION_LABEL_STYLE = \{[\s\S]{0,80}fontSize: 13,[\s\S]{0,80}lineHeight: 18,[\s\S]{0,80}fontWeight: "400"/,
 );
-assert.match(noteCard, /defaultValue=\{draftTextRef\.current\}/);
+assert.match(noteCard, /defaultValue=\{editorInitialText\}/);
 assert.match(
   noteCard,
   /if \(editingRef\.current\) return;[\s\S]{0,220}draftTextRef\.current = note\.text/,
@@ -3504,7 +3504,11 @@ assert.equal(
 assert.match(noteCard, /paddingHorizontal: 0,[\s\S]{0,60}paddingVertical: 0/);
 assert.match(
   noteCard,
-  /const \[editorViewportHeight, setEditorViewportHeight\][\s\S]{0,120}NOTE_LINE_HEIGHT/,
+  /const initialHeight = initialDraft\?\.viewportHeight \?\? NOTE_LINE_HEIGHT;/,
+);
+assert.match(
+  noteCard,
+  /const \[editorViewportHeight, setEditorViewportHeight\][\s\S]{0,80}useState\(initialHeight\)/,
 );
 assert.match(
   noteCard,
@@ -3606,7 +3610,7 @@ assert.ok(
 );
 assert.match(
   noteCard,
-  /onEditingChange\?\.\(note\.id, false\);[\s\S]{0,80}setEditing\(false\);/,
+  /onEditingChange\?\.\(note\.id, false, undefined, editorOwner\);[\s\S]{0,80}setEditing\(false\);/,
 );
 assert.match(noteCard, /requestAnimationFrame\(\(\) =>/);
 assert.doesNotMatch(noteCard, /setTimeout\([^\n]*focus/);
@@ -3782,7 +3786,7 @@ assert.doesNotMatch(
 );
 assert.doesNotMatch(noteInput, /setKeyboardVisible|Keyboard\.isVisible/);
 assert.doesNotMatch(noteInput, /onPressIn=\{\(\) =>/);
-assert.match(noteCard, /onEditingChangeRef\.current = onEditingChange/);
+assert.match(noteCard, /onEditorUnmountRef\.current = onEditorUnmount/);
 
 const archiveCard = read("src/features/archive/components/ArchiveCard.tsx");
 assert.match(archiveCard, /const CARD_BOTTOM_GAP = 11\.5/);
@@ -4514,7 +4518,7 @@ assertDeferredPersistence(
 );
 assertDeferredPersistence(
   postPaintUpdateHabitSource,
-  "// Habit detail has already published the complete schedule preview.",
+  "allHabits: state.allHabits.map(update)",
   "habitPersistence.persistScheduleEdit({",
   "habit schedule update",
 );
@@ -5230,7 +5234,7 @@ assert.match(
 );
 assert.match(
   habitPersistenceApplication,
-  /if \(reason != null\) \{[\s\S]{0,180}return repository\.transaction\(async \(session\) => \{[\s\S]{0,180}await persistRecord\(session\)[\s\S]{0,260}await session\.insertReasonNote/,
+  /if \(reason != null \|\| input\.validateSchedule\) \{[\s\S]{0,180}return repository\.transaction\(async \(session\) => \{[\s\S]{0,2000}await persistRecord\(session\)[\s\S]{0,400}await session\.insertReasonNote/,
   "reason notes must persist atomically with their day record",
 );
 assert.match(
@@ -5447,7 +5451,7 @@ assert.match(
 );
 assert.doesNotMatch(habitDetailHook, /\[cachedHabit, habitId, load\]/);
 assert.match(habitDetailHook, /const patchHabit = useCallback/);
-assert.match(habitDetailHook, /const patchDayStatus = useCallback/);
+assert.doesNotMatch(habitDetailHook, /const patchDayStatus = useCallback/);
 assert.match(
   habitDetailHook,
   /const cachedHabitRecords = useHabitStore\(\(state\) =>[\s\S]{0,120}getHabitDayRecordsForState\(state, habitId\)/,
@@ -5464,18 +5468,18 @@ assert.match(
 );
 assert.match(
   habitDetailHook,
-  /const records = schedulePreview\?\.records \?\? storedRecords/,
-  "a schedule edit must publish its habit row and matching calendar records as one visible preview",
+  /const records = storedRecords/,
+  "schedule and day commands must share the global record projection",
 );
 assert.match(
   habitDetailHook,
   /if \(forceDatabase\) setAuthoritativeRecords\(mappedRecords\)/,
   "an authoritative detail reload must not keep rendering stale global records",
 );
-assert.match(
+assert.doesNotMatch(
   habitDetailHook,
-  /if \(useHabitStore\.getState\(\)\.allDayRecordsLoaded\) return;[\s\S]{0,80}setFallbackRecords/,
-  "local record patching must only serve the uncached direct-open fallback",
+  /LocalSchedulePreview|setFallbackRecords\(updateRecords\)/,
+  "detail must hydrate global history rather than own a second interactive record projection",
 );
 assert.doesNotMatch(habitDetailHook, /areDayRecordListsEqual/);
 assert.match(
@@ -5590,7 +5594,7 @@ assert.match(
 assert.match(habitDetailScreen, /const dayData = useMemo\(/);
 assert.match(
   habitDetailScreen,
-  /const expectedStatus = existing \? null : "done";[\s\S]{0,420}patchDayStatus\(date, expectedStatus\);[\s\S]{0,180}persistDayStatus\(date, "done"\)/,
+  /const existing = records\.find\([\s\S]{0,180}if \(existing\)[\s\S]{0,100}persistDayRemoval\(date\);[\s\S]{0,100}persistDayStatus\(date, "done"\)/,
 );
 assert.match(
   habitDetailScreen,
@@ -5601,7 +5605,7 @@ assert.ok(
     startDateApplySource.indexOf("nextStartDate === currentHabit.startDate") >
       startDateApplySource.indexOf("const nextStartDate = date;") &&
     startDateApplySource.indexOf(
-      "previewSchedule({ startDate: nextStartDate })",
+      "await updateHabit(habitId, {",
     ) >
       startDateApplySource.indexOf("nextStartDate === currentHabit.startDate"),
   "start-date UI must publish the validated value before persistence",
@@ -5638,12 +5642,12 @@ assertSourceOrder(
 );
 assert.match(
   habitDetailScreen,
-  /previewSchedule\(\{ repeatSchedule: schedule \}\);[\s\S]{0,700}updateHabit\(habitId, \{[\s\S]{0,100}repeatSchedule: schedule,[\s\S]{0,100}startDate: previousStartDate/,
+  /updateHabit\(habitId, \{[\s\S]{0,100}repeatSchedule: schedule,[\s\S]{0,100}startDate: previousStartDate/,
   "repeat edits must publish immediately and persist the complete visible schedule pair",
 );
 assert.match(
   habitDetailScreen,
-  /previewSchedule\(\{ startDate: nextStartDate \}\);[\s\S]{0,400}updateHabit\(habitId, \{[\s\S]{0,100}startDate: nextStartDate,[\s\S]{0,100}repeatSchedule: previousSchedule/,
+  /updateHabit\(habitId, \{[\s\S]{0,100}startDate: nextStartDate,[\s\S]{0,100}repeatSchedule: previousSchedule/,
   "start-date edits must publish immediately and persist the complete visible schedule pair",
 );
 assert.doesNotMatch(

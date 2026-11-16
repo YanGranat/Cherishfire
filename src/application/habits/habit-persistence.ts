@@ -7,9 +7,11 @@ import type {
 } from "@/types/habit";
 import {
   closeArchivePeriod,
+  isHabitTrackingActiveOnDate,
   startArchivePeriod,
 } from "@/domain/habits/archive-periods";
 import { planHabitScheduleEdit } from "@/domain/habits/schedule-edit";
+import { isHabitScheduledForDate } from "@/domain/habits/schedule";
 import { getDescriptionLinesSettingKey } from "@/application/settings/habit-description-lines-setting";
 import {
   assignDisplayOrdersAroundArchivedSlots,
@@ -110,12 +112,20 @@ export class StaleHabitScheduleMutationError extends Error {
   }
 }
 
+export class InvalidHabitDayMutationError extends Error {
+  constructor() {
+    super("The day is no longer available in the habit schedule");
+    this.name = "InvalidHabitDayMutationError";
+  }
+}
+
 export type HabitSchedulePersistenceResult =
   | { kind: "missing" }
-  | { kind: "unchanged" }
+  | { kind: "unchanged"; habit: Habit; records: DayRecord[] }
   | {
       kind: "updated";
       habit: Habit;
+      records: DayRecord[];
       removedRecordIds: readonly number[];
       removedRecordDates: readonly string[];
     };
@@ -155,6 +165,7 @@ export interface HabitPersistenceApplication {
     status: DayStatus;
     reason?: string;
     now: number;
+    validateSchedule?: boolean;
   }): Promise<DayRecord>;
   unmarkDay(habitId: number, date: string): Promise<void>;
 }
@@ -243,7 +254,11 @@ export function createHabitPersistenceApplication(
           assertScheduleMutationCurrent(input.isCurrent);
           await session.patchHabit(input.habitId, input.patch);
           assertScheduleMutationCurrent(input.isCurrent);
-          return { kind: "unchanged" };
+          return {
+            kind: "unchanged",
+            habit: applyHabitPatch(authoritativeHabit, input.patch),
+            records,
+          };
         }
 
         const removedRecordIds = plan.removedRecords.map(
@@ -284,6 +299,7 @@ export function createHabitPersistenceApplication(
         return {
           kind: "updated",
           habit: persistedHabit,
+          records: plan.keptRecords,
           removedRecordIds,
           removedRecordDates: [...removedRecordDates],
         };
@@ -383,18 +399,39 @@ export function createHabitPersistenceApplication(
           updatedAt: input.now,
         });
 
-      if (reason != null) {
+      if (reason != null || input.validateSchedule) {
         return repository.transaction(async (session) => {
+          if (input.validateSchedule) {
+            const habit = await session.readHabit(input.habitId);
+            const records = habit
+              ? await session.readDayRecordsForHabitOrderedByDate(input.habitId)
+              : [];
+            if (
+              !habit ||
+              !isHabitTrackingActiveOnDate(habit, input.date) ||
+              !isHabitScheduledForDate(
+                habit.repeatSchedule,
+                habit.startDate,
+                input.date,
+                records,
+                habit.scheduleHistory,
+              )
+            ) {
+              throw new InvalidHabitDayMutationError();
+            }
+          }
           const record = await persistRecord(session);
-          await session.insertReasonNote({
-            habitId: input.habitId,
-            date: input.date,
-            text: reason,
-            isFailureReason: input.status === "failure",
-            reasonType: input.status as "failure" | "skipped",
-            createdAt: input.now,
-            updatedAt: input.now,
-          });
+          if (reason != null) {
+            await session.insertReasonNote({
+              habitId: input.habitId,
+              date: input.date,
+              text: reason,
+              isFailureReason: input.status === "failure",
+              reasonType: input.status as "failure" | "skipped",
+              createdAt: input.now,
+              updatedAt: input.now,
+            });
+          }
           return record;
         });
       }

@@ -103,9 +103,6 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
     error,
     reload,
     patchHabit,
-    previewSchedule,
-    clearSchedulePreview,
-    patchDayStatus,
   } = useHabitDetail(habitId);
   const presentationState = resolveHabitDetailPresentationState({
     hasHabit: habit != null,
@@ -297,10 +294,9 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
       if (!currentHabit || currentHabit.isArchived) {
         return;
       }
-      patchDayStatus(command.date, command.status);
       persistDayStatus(command.date, command.status, command.reason);
     },
-    [patchDayStatus, persistDayStatus],
+    [persistDayStatus],
   );
   useLayoutEffect(
     () => () => {
@@ -325,8 +321,6 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
         return;
       }
       const existing = records.find((record) => record.date === date);
-      const expectedStatus = existing ? null : "done";
-      patchDayStatus(date, expectedStatus);
       if (existing) {
         persistDayRemoval(date);
       } else {
@@ -335,7 +329,6 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
     },
     [
       habit?.isArchived,
-      patchDayStatus,
       persistDayRemoval,
       persistDayStatus,
       records,
@@ -379,7 +372,6 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
         return;
       }
       const previousStartDate = currentHabit.startDate;
-      previewSchedule({ repeatSchedule: schedule });
       void runDetailAction("repeat", async () => {
         // The latest schedule intent always persists the complete visible
         // pair. Otherwise a rapid date -> repeat edit could supersede the
@@ -390,14 +382,11 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
         });
       }).then(({ succeeded, isLatest }) => {
         if (succeeded || !isLatest) return;
-        clearSchedulePreview();
         void reload(true);
       });
     },
     [
-      clearSchedulePreview,
       habitId,
-      previewSchedule,
       reload,
       runDetailAction,
       updateHabit,
@@ -417,7 +406,6 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
         return;
       }
       const previousSchedule = currentHabit.repeatSchedule;
-      previewSchedule({ startDate: nextStartDate });
       void runDetailAction("start-date", async () => {
         await updateHabit(habitId, {
           startDate: nextStartDate,
@@ -425,14 +413,11 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
         });
       }).then(({ succeeded, isLatest }) => {
         if (succeeded || !isLatest) return;
-        clearSchedulePreview();
         void reload(true);
       });
     },
     [
-      clearSchedulePreview,
       habitId,
-      previewSchedule,
       reload,
       runDetailAction,
       updateHabit,

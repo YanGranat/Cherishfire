@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { withAuditDeadline } from "./fixtures/with-audit-deadline";
 import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
@@ -1144,7 +1145,7 @@ async function main(): Promise<void> {
   console.log("Data-transfer coordinator audit passed.");
 }
 
-void main().catch((error) => {
+void withAuditDeadline(main, "Data-transfer coordinator audit").catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });

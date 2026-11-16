@@ -1148,7 +1148,8 @@ assert.match(
 );
 assert.match(scheduleEditSource, /partitionRecordsForScheduleVersion\(/);
 assert.match(habitPersistence, /const plan = planHabitScheduleEdit\(/);
-assert.match(habitDetailHook, /const plan = planHabitScheduleEdit\(/);
+assert.match(store, /const plan = planHabitScheduleEdit\(/);
+assert.doesNotMatch(habitDetailHook, /LocalSchedulePreview|patchDayStatus/);
 assert.match(
   habitDetailHook,
   /peekStreakStats\([\s\S]{0,260}if \(prepared\)\s*return prepared;[\s\S]{0,220}calculateStreakStats\(/,
@@ -1156,12 +1157,12 @@ assert.match(
 );
 assert.match(
   habitDetailScreen,
-  /previewSchedule\(\{ repeatSchedule: schedule \}\)[\s\S]{0,360}repeatSchedule: schedule,[\s\S]{0,100}startDate: previousStartDate/,
+  /await updateHabit\(habitId, \{[\s\S]{0,100}repeatSchedule: schedule,[\s\S]{0,100}startDate: previousStartDate/,
   "a rapid schedule edit must publish one atomic preview and persist its complete visible pair",
 );
 assert.match(
   habitDetailScreen,
-  /previewSchedule\(\{ startDate: nextStartDate \}\)[\s\S]{0,300}startDate: nextStartDate,[\s\S]{0,100}repeatSchedule: previousSchedule/,
+  /await updateHabit\(habitId, \{[\s\S]{0,100}startDate: nextStartDate,[\s\S]{0,100}repeatSchedule: previousSchedule/,
   "a rapid start-date edit must publish one atomic preview and persist its complete visible pair",
 );
 assert.match(

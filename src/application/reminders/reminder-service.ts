@@ -126,6 +126,7 @@ class ReminderApplicationService implements ReminderService {
     resolve: (succeeded: boolean) => void;
   }[] = [];
   private reminderNotificationsEnabled = true;
+  // Updated by accepted habit commands or authoritative import recovery only.
   private latestHabitsSnapshot: Habit[] = [];
   private lastDeviceTimezoneSignature: string;
   private nativeReconciliationDirty = false;
@@ -144,7 +145,7 @@ class ReminderApplicationService implements ReminderService {
   private readonly admittedSchedules = new Map<string, DesiredReminderSchedule>();
 
   private readonly replacementGate: ReminderReplacementGate;
-  private readonly deferredWork: DeferredReminderWorkCoordinator<Habit[]>;
+  private readonly deferredWork: DeferredReminderWorkCoordinator;
 
   constructor(private readonly dependencies: ReminderServiceDependencies) {
     this.lastDeviceTimezoneSignature =
@@ -163,17 +164,23 @@ class ReminderApplicationService implements ReminderService {
         this.admittedSchedules.clear();
       },
     );
-    this.deferredWork = new DeferredReminderWorkCoordinator<Habit[]>({
+    this.deferredWork = new DeferredReminderWorkCoordinator({
       scheduleAfterUiSettles: (task) =>
         this.dependencies.workScheduling.scheduleAfterUiSettles(task),
       isAppActive: () => this.dependencies.workScheduling.isAppActive(),
-      runFullSync: (snapshot) => {
+      runFullSync: (includesRecordChanges) => {
         const requestPermission = this.pendingExplicitPermissionRequest;
         this.pendingExplicitPermissionRequest = false;
-        return this.syncHabitReminders(snapshot, { requestPermission });
+        return this.syncHabitReminders(this.latestHabitsSnapshot, {
+          force: includesRecordChanges,
+          requestPermission,
+        });
       },
-      runRecordSync: (snapshot, habitIds) =>
-        this.syncHabitRemindersAfterRecordChanges(snapshot, habitIds),
+      runRecordSync: (habitIds) =>
+        this.syncHabitRemindersAfterRecordChanges(
+          this.latestHabitsSnapshot,
+          habitIds,
+        ),
       runLocalizationRefresh: () =>
         this.refreshReminderNotificationLocalization(),
       onError: () => undefined,
@@ -232,10 +239,11 @@ class ReminderApplicationService implements ReminderService {
     const habitsSnapshot = [...habitsList];
     this.replacementGate.schedule(async () => {
       this.snapshotGeneration += 1;
+      this.latestHabitsSnapshot = habitsSnapshot;
       if (intent?.requestPermission) {
         this.pendingExplicitPermissionRequest = true;
       }
-      this.deferredWork.scheduleFullSync(habitsSnapshot);
+      this.deferredWork.scheduleFullSync();
     });
   }
 
@@ -246,8 +254,9 @@ class ReminderApplicationService implements ReminderService {
     const habitsSnapshot = [...habitsList];
     this.replacementGate.schedule(async () => {
       this.snapshotGeneration += 1;
+      this.latestHabitsSnapshot = habitsSnapshot;
       this.capacityRefreshRevision = 0;
-      this.deferredWork.scheduleRecordSync(habitsSnapshot, habitId);
+      this.deferredWork.scheduleRecordSync(habitId);
     });
   }
 
@@ -1059,7 +1068,6 @@ class ReminderApplicationService implements ReminderService {
     options?: ReminderSyncOptions,
   ): Promise<boolean> {
     const habitsSnapshot = [...habitsList];
-    this.latestHabitsSnapshot = habitsSnapshot;
     const signature = this.buildFullSyncSignature(
       habitsSnapshot,
       format(this.dependencies.clock.now(), "yyyy-MM-dd"),
@@ -1124,7 +1132,6 @@ class ReminderApplicationService implements ReminderService {
   ): Promise<void> {
     const habitsSnapshot = [...habitsList];
     const changedHabitIds = [...new Set(habitIds)];
-    this.latestHabitsSnapshot = habitsSnapshot;
 
     const changedHabitIdSet = new Set(changedHabitIds);
     const changedHabits = this.reminderNotificationsEnabled

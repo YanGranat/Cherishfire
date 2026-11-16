@@ -52,6 +52,7 @@ import {
 import { parseHabitRouteId } from "@/domain/habits/route-id";
 import { notesApplication, type NotesSessionNote } from "@/composition/notes";
 import { useHabitStore } from "@/stores/habit-store";
+import { NoteEditorSession, type NoteEditorRowOwner } from "@/features/notes/utils/note-editor-session";
 interface PageMeasurable {
   measure: (
     callback: (
@@ -67,6 +68,7 @@ interface PageMeasurable {
 interface ActiveEditorSave {
   noteId: number;
   saveDraft: () => boolean;
+  owner?: NoteEditorRowOwner;
 }
 interface ActiveEditorGeometry {
   requestId: number;
@@ -188,6 +190,12 @@ function NotesScreen({ habitId }: { habitId: number }) {
     notesSession.getSnapshot,
   );
   const noteList = notesSnapshot.notes;
+  const [editorSession, setEditorSession] = useState(
+    () => new NoteEditorSession(notesSnapshot.generation),
+  );
+  if (editorSession.generation !== notesSnapshot.generation) {
+    setEditorSession(new NoteEditorSession(notesSnapshot.generation));
+  }
   const habitExists = notesSnapshot.habitExists;
   const isLoading =
     notesSnapshot.habitExists == null &&
@@ -222,6 +230,11 @@ function NotesScreen({ habitId }: { habitId: number }) {
         }
       >(),
   );
+  const [recoveryGeneration, setRecoveryGeneration] = useState(notesSnapshot.generation);
+  if (recoveryGeneration !== notesSnapshot.generation) {
+    setRecoveryGeneration(notesSnapshot.generation);
+    setNoteRecoveryDrafts(new Map());
+  }
   const shouldScrollToNewNoteRef = useRef(false);
   const scrollOffsetRef = useRef(0);
   const isScrollDragActiveRef = useRef(false);
@@ -738,19 +751,39 @@ function NotesScreen({ habitId }: { habitId: number }) {
     }
   };
   const handleNoteEditingChange = useCallback(
-    (noteId: number, editing: boolean, saveDraft?: () => boolean) => {
+    (noteId: number, editing: boolean, saveDraft?: () => boolean, owner?: NoteEditorRowOwner) => {
+      if (!editing && owner != null && activeEditorSaveRef.current?.owner !== owner) {
+        return false;
+      }
       if (editing) {
         if (!saveDraft) return false;
         const previousEditor = activeEditorSaveRef.current;
-        if (previousEditor && previousEditor.noteId !== noteId) {
+        const previousDraft = editorSession.getActiveDraft();
+        if (previousDraft && previousDraft.noteId !== noteId) {
           editorHandoffInProgressRef.current = true;
           try {
-            if (!previousEditor.saveDraft()) return false;
+            if (previousEditor?.noteId === previousDraft.noteId && previousEditor.owner?.live !== false) {
+              if (!previousEditor.saveDraft()) return false;
+            } else {
+              const trimmed = previousDraft.text.trim();
+              if (!trimmed) return false;
+              const previousNote = notesSession.getSnapshot().notes.find(
+                (note) => note.clientMutationId === previousDraft.clientMutationId,
+              );
+              if (
+                previousNote &&
+                trimmed !== previousNote.text &&
+                !handleSave(previousNote.id, trimmed)
+              ) {
+                return false;
+              }
+              editorSession.finish(previousDraft.clientMutationId);
+            }
           } finally {
             editorHandoffInProgressRef.current = false;
           }
         }
-        activeEditorSaveRef.current = { noteId, saveDraft };
+        activeEditorSaveRef.current = { noteId, saveDraft, owner };
         shouldScrollToNewNoteRef.current = false;
         activeEditorNoteIdRef.current = noteId;
         activeEditorTargetRef.current = null;
@@ -783,8 +816,42 @@ function NotesScreen({ habitId }: { habitId: number }) {
       clearEditorGeometryFrames,
       clearEditorRevealFrame,
       clearTopScrollSettleTimer,
+      editorSession,
+      handleSave,
+      notesSession,
     ],
   );
+  const handleNoteEditorUnmount = useCallback(
+    (noteId: number, clientMutationId: string, owner: NoteEditorRowOwner) => {
+      if (activeEditorNoteIdRef.current !== noteId) return;
+      if (activeEditorSaveRef.current?.owner !== owner) return;
+      if (editorSession.getDraft(clientMutationId) == null) {
+        handleNoteEditingChange(noteId, false);
+        return;
+      }
+      // Virtualization detaches native targets, not the logical editor.
+      activeEditorSaveRef.current = null;
+      activeEditorTargetRef.current = null;
+      activeEditorGeometryRef.current = null;
+      completedEditorGeometryKeyRef.current = null;
+      pendingEditorCorrectionRef.current = null;
+      clearEditorRevealFrame();
+      clearEditorGeometryFrames();
+    },
+    [
+      clearEditorGeometryFrames,
+      clearEditorRevealFrame,
+      editorSession,
+      handleNoteEditingChange,
+    ],
+  );
+  useLayoutEffect(() => {
+    editorSession.reconcile(noteList);
+    const activeNoteId = activeEditorNoteIdRef.current;
+    if (activeNoteId != null && editorSession.getActiveDraft() == null) {
+      handleNoteEditingChange(activeNoteId, false);
+    }
+  }, [editorSession, handleNoteEditingChange, noteList]);
   const handleNoteEditorReady = useCallback(
     (noteId: number, target: View | null, phase: "focus" | "layout") => {
       if (!target || activeEditorSaveRef.current?.noteId !== noteId) return;
@@ -828,10 +895,13 @@ function NotesScreen({ habitId }: { habitId: number }) {
   const renderNote = useCallback(
     ({ item }: ListRenderItemInfo<NotesSessionNote>) => (
       <NoteCard
+        key={`${editorSession.generation}:${item.clientMutationId}`}
         note={item}
+        editorSession={editorSession}
         onSave={handleSave}
         onDelete={handleDeleteRequest}
         onEditingChange={handleNoteEditingChange}
+        onEditorUnmount={handleNoteEditorUnmount}
         onEditorReady={handleNoteEditorReady}
         onEditorGeometry={handleNoteEditorGeometry}
         recoveryDraft={noteRecoveryDrafts.get(item.id) ?? null}
@@ -840,9 +910,11 @@ function NotesScreen({ habitId }: { habitId: number }) {
     [
       handleDeleteRequest,
       handleNoteEditingChange,
+      handleNoteEditorUnmount,
       handleNoteEditorGeometry,
       handleNoteEditorReady,
       handleSave,
+      editorSession,
       noteRecoveryDrafts,
     ],
   );

@@ -329,6 +329,50 @@ function auditReminderScheduleDates(): void {
     REMINDER_MAX_PER_HABIT,
     "the per-habit native scheduling cap must remain exact",
   );
+  const expectedCappedDates = Array.from({ length: 21 }, (_, dayOffset) =>
+    [8, 12, 18].map((hour) => new Date(2026, 7, 29 + dayOffset, hour).getTime()),
+  ).flat();
+  expectedCappedDates.push(new Date(2026, 8, 19, 8).getTime());
+  for (const times of [
+    ["08:00", "12:00", "18:00"],
+    ["08:00", "18:00", "12:00"],
+    ["12:00", "08:00", "18:00"],
+    ["12:00", "18:00", "08:00"],
+    ["18:00", "08:00", "12:00"],
+    ["18:00", "12:00", "08:00"],
+  ]) {
+    const habit = makeHabit({ reminderTime: JSON.stringify(times) });
+    const encodedTimes = habit.reminderTime;
+    assert.deepEqual(
+      buildUpcomingReminderDates(habit, [], now).map((date) => date.getTime()),
+      expectedCappedDates,
+      "the native cap must select the nearest dates regardless of editor row order",
+    );
+    assert.equal(habit.reminderTime, encodedTimes, "planning must preserve encoded editor order");
+  }
+
+  const originalTimezone = process.env.TZ;
+  try {
+    process.env.TZ = "America/New_York";
+    const earlyTimes = Array.from({ length: 61 }, (_, index) => {
+      const minute = index + 1;
+      return `${Math.floor(minute / 60).toString().padStart(2, "0")}:${(minute % 60).toString().padStart(2, "0")}`;
+    });
+    const habit = makeHabit({
+      startDate: "2026-03-01",
+      scheduleHistory: [{ effectiveFrom: "2026-03-01", startDate: "2026-03-01", repeatSchedule: { type: "daily" } }],
+      reminderTime: JSON.stringify([...earlyTimes, "02:30", "03:00", "03:30", "04:00", "05:00"]),
+    });
+    const gapDate = new Date(2026, 2, 8, 2, 30);
+    assert.equal(gapDate.getHours(), 3, "the timezone fixture must cross a daylight-saving gap");
+    const gapDates = buildUpcomingReminderDates(habit, [], new Date(2026, 2, 8));
+    assert.equal(gapDates.length, REMINDER_MAX_PER_HABIT);
+    assert.equal(new Set(gapDates.map((date) => date.getTime())).size, REMINDER_MAX_PER_HABIT, "normalized duplicate instants must not consume native capacity twice");
+    assert.deepEqual(gapDates.slice(-3).map((date) => [date.getHours(), date.getMinutes()]), [[3, 0], [3, 30], [4, 0]], "actual instants must be ordered before applying the cap across a daylight-saving gap");
+  } finally {
+    if (originalTimezone == null) delete process.env.TZ;
+    else process.env.TZ = originalTimezone;
+  }
   assert.deepEqual(
     buildUpcomingReminderDates(
       makeHabit({ isArchived: true, archivedAt: 1 }),
@@ -401,6 +445,7 @@ function createReminderServiceHarness(options?: {
   let cancellationFailures = 0;
   let scheduledListReadFailures = 0;
   let scheduledReadBarrier: { wait: Promise<void>; started(): void } | null = null;
+  let recordReadBarrier: { wait: Promise<void>; started(): void } | null = null;
   let schedulingFailures = 0;
   let schedulingFailureAfter: number | null = null;
   let records: { habitId: number; date: string; status: string }[] = [];
@@ -561,7 +606,14 @@ function createReminderServiceHarness(options?: {
     dayRecords: {
       async readByHabitIds() {
         recordReadCount += 1;
-        return records;
+        const snapshot = [...records];
+        const barrier = recordReadBarrier;
+        recordReadBarrier = null;
+        if (barrier) {
+          barrier.started();
+          await barrier.wait;
+        }
+        return snapshot;
       },
     },
     notifications,
@@ -606,6 +658,14 @@ function createReminderServiceHarness(options?: {
       const wait = new Promise<void>((resolve) => { release = resolve; });
       const observed = new Promise<void>((resolve) => { started = resolve; });
       scheduledReadBarrier = { wait, started };
+      return { started: observed, release };
+    },
+    holdNextRecordRead() {
+      let release!: () => void;
+      let started!: () => void;
+      const wait = new Promise<void>((resolve) => { release = resolve; });
+      const observed = new Promise<void>((resolve) => { started = resolve; });
+      recordReadBarrier = { wait, started };
       return { started: observed, release };
     },
     deliverReminder(identifier: string) {
@@ -1642,6 +1702,177 @@ type NativeNotificationResponseListener = Parameters<
 type NativeNotificationResponseFixture =
   Parameters<NativeNotificationResponseListener>[0];
 
+async function auditReminderAdmissionOwnership(): Promise<void> {
+  for (const pendingReminderLimit of [null, IOS_PENDING_REMINDER_LIMIT]) {
+    const makeHarness = () => createReminderServiceHarness({
+      preserveScheduledState: true,
+      pendingReminderLimit,
+    });
+    const pendingHabitIds = (harness: ReturnType<typeof makeHarness>) =>
+      new Set(harness.pendingSchedules().map((request) => request.habitId));
+    const pendingEpochs = (harness: ReturnType<typeof makeHarness>) =>
+      harness.pendingSchedules()
+        .map((request) => Number(JSON.parse(request.scheduleKey!)[2]))
+        .sort((left, right) => left - right);
+    const original = makeHabit();
+    const replacement = makeHabit({ id: 2, name: "Read", reminderTime: "20:00" });
+    const handled = [{ habitId: 1, date: "2026-08-29", status: "done" }];
+
+    for (const recordFirst of [true, false]) {
+      const unchanged = makeHarness();
+      unchanged.service.scheduleHabitRemindersSync([original]);
+      await runDeferredReminderServiceWork(unchanged.service);
+      unchanged.setRecords(handled);
+      const record = () =>
+        unchanged.service.scheduleHabitReminderAfterRecordChange([original], 1);
+      const full = () => unchanged.service.scheduleHabitRemindersSync([original]);
+      if (recordFirst) {
+        record();
+        full();
+      } else {
+        full();
+        record();
+      }
+      await runDeferredReminderServiceWork(unchanged.service);
+      assert.equal(
+        unchanged.pendingSchedules().length,
+        30,
+        "a full sync that absorbs record changes must not use the unchanged-configuration fast path",
+      );
+    }
+
+    // Full replacement must supersede an older accepted record batch before
+    // either idle callback has started, including background-driven admission.
+    for (const nextHabits of [[], [replacement]]) {
+      const harness = makeHarness();
+      harness.service.scheduleHabitRemindersSync([original]);
+      await runDeferredReminderServiceWork(harness.service);
+      harness.setRecords(handled);
+      harness.service.scheduleHabitReminderAfterRecordChange([original], 1);
+      harness.service.scheduleHabitRemindersSync(nextHabits);
+      harness.service.startPendingReminderWorkBeforeBackground();
+      await runDeferredReminderServiceWork(harness.service);
+      assert.deepEqual(
+        pendingHabitIds(harness),
+        new Set(nextHabits.map((habit) => habit.id)),
+        "a full snapshot must absorb older deferred record work without restoring a removed habit",
+      );
+      harness.setNow(new Date(2026, 7, 30, 7, 30));
+      await harness.service.refreshReminderNotificationTimezone();
+      harness.service.scheduleReminderNotificationLocalizationRefresh();
+      await runDeferredReminderServiceWork(harness.service);
+      await harness.service.setReminderNotificationsEnabled(false);
+      await harness.service.setReminderNotificationsEnabled(true);
+      assert.deepEqual(
+        pendingHabitIds(harness),
+        new Set(nextHabits.map((habit) => habit.id)),
+        "foreground, localization and master-setting repair must retain the latest admitted snapshot",
+      );
+    }
+
+    // A later record intent also carries the current complete habit snapshot.
+    const latest = makeHarness();
+    latest.service.scheduleHabitRemindersSync([original]);
+    latest.service.scheduleHabitReminderAfterRecordChange([replacement], 2);
+    await runDeferredReminderServiceWork(latest.service);
+    assert.deepEqual(
+      pendingHabitIds(latest),
+      new Set([2]),
+      "a deferred full sync must read the latest record-admitted habit snapshot",
+    );
+
+    const aborted = makeHarness();
+    aborted.service.scheduleHabitRemindersSync([original]);
+    await runDeferredReminderServiceWork(aborted.service);
+    const boundary = await aborted.service.flushAndFreezePendingReminderWork();
+    aborted.service.scheduleHabitReminderAfterRecordChange([original], 1);
+    aborted.service.scheduleHabitRemindersSync([]);
+    await boundary.release("import-aborted");
+    await runDeferredReminderServiceWork(aborted.service);
+    assert.equal(
+      aborted.pendingSchedules().length,
+      0,
+      "aborted import replay must preserve full/record acceptance ownership",
+    );
+
+    for (const nextHabit of [original, replacement]) {
+      const inFlight = makeHarness();
+      inFlight.service.scheduleHabitRemindersSync([original]);
+      await runDeferredReminderServiceWork(inFlight.service);
+      inFlight.setRecords(handled);
+      const oldRecordRead = inFlight.holdNextRecordRead();
+      inFlight.service.scheduleHabitReminderAfterRecordChange([original], 1);
+      inFlight.service.startPendingReminderWorkBeforeBackground();
+      await oldRecordRead.started;
+      inFlight.service.scheduleHabitRemindersSync([nextHabit]);
+      inFlight.service.startPendingReminderWorkBeforeBackground();
+      oldRecordRead.release();
+      await runDeferredReminderServiceWork(inFlight.service);
+      assert.deepEqual(
+        pendingHabitIds(inFlight),
+        new Set([nextHabit.id]),
+        "a late running record continuation must not override a newer full snapshot",
+      );
+      assert.equal(
+        inFlight.pendingSchedules().length,
+        nextHabit.id === 1 ? 30 : 31,
+        "a full sync must cover the record batch it preempts even when configuration is unchanged",
+      );
+      inFlight.setNow(new Date(2026, 7, 30, 7, 30));
+      await inFlight.service.refreshReminderNotificationTimezone();
+      assert.deepEqual(pendingHabitIds(inFlight), new Set([nextHabit.id]));
+    }
+
+    const failed = makeHarness();
+    failed.service.scheduleHabitRemindersSync([original]);
+    await runDeferredReminderServiceWork(failed.service);
+    failed.service.scheduleHabitReminderAfterRecordChange([original], 1);
+    failed.service.scheduleHabitRemindersSync([replacement]);
+    failed.failCancellations();
+    await runDeferredReminderServiceWork(failed.service);
+    await failed.service.refreshReminderNotificationTimezone();
+    assert.deepEqual(
+      pendingHabitIds(failed),
+      new Set([2]),
+      "failed full cleanup must retry the latest snapshot after absorbing old record work",
+    );
+
+    // Capture a full read before the new durable record arrives. The follow-up
+    // must survive because this full batch can no longer cover that record.
+    const duringFull = makeHarness();
+    const fullRead = duringFull.holdNextRecordRead();
+    duringFull.service.scheduleHabitRemindersSync([original]);
+    duringFull.service.startPendingReminderWorkBeforeBackground();
+    await fullRead.started;
+    duringFull.setRecords(handled);
+    duringFull.service.scheduleHabitReminderAfterRecordChange([original], 1);
+    fullRead.release();
+    await runDeferredReminderServiceWork(duringFull.service);
+    assert.equal(
+      duringFull.pendingSchedules().length,
+      30,
+      "a record accepted after a running full read must receive a follow-up reconciliation",
+    );
+    assert.ok(
+      pendingEpochs(duringFull).every((epoch) => epoch >= new Date(2026, 7, 30).getTime()),
+      "the handled date must not remain pending after the full/record race",
+    );
+
+    const chronological = makeHarness();
+    chronological.service.scheduleHabitRemindersSync([
+      makeHabit({ reminderTime: '["18:00","08:00","12:00"]' }),
+    ]);
+    await runDeferredReminderServiceWork(chronological.service);
+    const epochs = pendingEpochs(chronological);
+    assert.equal(epochs.length, REMINDER_MAX_PER_HABIT);
+    assert.equal(
+      epochs.at(-1),
+      new Date(2026, 8, 19, 8).getTime(),
+      "the actual native plan must retain the earliest cap-boundary reminder",
+    );
+  }
+}
+
 function makeNativeNotificationResponse(
   identifier: string,
   habitId: number | null = 1,
@@ -2371,14 +2602,14 @@ async function auditDeferredReminderCoordinator(): Promise<void> {
   {
     const ui = createManualUiScheduler();
     const calls: string[] = [];
-    const coordinator = new DeferredReminderWorkCoordinator<number>({
+    const coordinator = new DeferredReminderWorkCoordinator({
       scheduleAfterUiSettles: ui.schedule,
       isAppActive: () => true,
-      async runFullSync(snapshot) {
-        calls.push(`full:${snapshot}`);
+      async runFullSync() {
+        calls.push("full");
       },
-      async runRecordSync(snapshot, habitIds) {
-        calls.push(`record:${snapshot}:${habitIds.join(",")}`);
+      async runRecordSync(habitIds) {
+        calls.push(`record:${habitIds.join(",")}`);
       },
       async runLocalizationRefresh() {
         calls.push("localization");
@@ -2388,21 +2619,21 @@ async function auditDeferredReminderCoordinator(): Promise<void> {
       },
     });
 
-    coordinator.scheduleFullSync(1);
-    coordinator.scheduleFullSync(2);
-    coordinator.scheduleRecordSync(10, 7);
-    coordinator.scheduleRecordSync(11, 7);
-    coordinator.scheduleRecordSync(12, 8);
+    coordinator.scheduleFullSync();
+    coordinator.scheduleFullSync();
+    coordinator.scheduleRecordSync(7);
+    coordinator.scheduleRecordSync(7);
+    coordinator.scheduleRecordSync(8);
     coordinator.scheduleLocalizationRefresh();
     coordinator.scheduleLocalizationRefresh();
 
     assert.equal(
       ui.scheduled.length,
-      4,
-      "full/record work coalesces into one callback while localization reschedules its callback",
+      3,
+      "a deferred full sync covers record work while localization reschedules its callback",
     );
     await coordinator.flushAndWait();
-    assert.deepEqual(calls, ["full:2", "record:12:7,8", "localization"]);
+    assert.deepEqual(calls, ["full", "localization"]);
     assert.equal(
       ui.scheduled.every((entry) => entry.cancelled),
       true,
@@ -2416,13 +2647,13 @@ async function auditDeferredReminderCoordinator(): Promise<void> {
     const inFlightUi = createManualUiScheduler();
     const inFlightCalls: string[] = [];
     let recordRunCount = 0;
-    const inFlightCoordinator = new DeferredReminderWorkCoordinator<number>({
+    const inFlightCoordinator = new DeferredReminderWorkCoordinator({
       scheduleAfterUiSettles: inFlightUi.schedule,
       isAppActive: () => true,
       async runFullSync() {},
-      async runRecordSync(snapshot, habitIds) {
+      async runRecordSync(habitIds) {
         recordRunCount += 1;
-        inFlightCalls.push(`record:${snapshot}:${habitIds.join(",")}`);
+        inFlightCalls.push(`record:${habitIds.join(",")}`);
         if (recordRunCount === 1) await firstRecordRunPending;
       },
       async runLocalizationRefresh() {},
@@ -2430,11 +2661,11 @@ async function auditDeferredReminderCoordinator(): Promise<void> {
         throw error;
       },
     });
-    inFlightCoordinator.scheduleRecordSync(20, 1);
+    inFlightCoordinator.scheduleRecordSync(1);
     inFlightCoordinator.startAcceptedWorkNow();
     await Promise.resolve();
-    inFlightCoordinator.scheduleRecordSync(21, 1);
-    inFlightCoordinator.scheduleRecordSync(22, 2);
+    inFlightCoordinator.scheduleRecordSync(1);
+    inFlightCoordinator.scheduleRecordSync(2);
     assert.equal(
       inFlightUi.scheduled.length,
       1,
@@ -2442,7 +2673,7 @@ async function auditDeferredReminderCoordinator(): Promise<void> {
     );
     assert.deepEqual(
       inFlightCalls,
-      ["record:20:1"],
+      ["record:1"],
       "record work accepted during an active native batch must not start concurrently",
     );
     releaseFirstRecordRun();
@@ -2456,20 +2687,20 @@ async function auditDeferredReminderCoordinator(): Promise<void> {
     await inFlightCoordinator.flushAndWait();
     assert.deepEqual(
       inFlightCalls,
-      ["record:20:1", "record:22:1,2"],
-      "record work accepted in flight must collapse to the latest snapshot and unique habit IDs",
+      ["record:1", "record:1,2"],
+      "record work accepted in flight must collapse to unique habit IDs",
     );
 
     const failedWriteRepairUi = createManualUiScheduler();
     const failedWriteRepairCalls: string[] = [];
     const failedWriteRepairCoordinator =
-      new DeferredReminderWorkCoordinator<number>({
+      new DeferredReminderWorkCoordinator({
         scheduleAfterUiSettles: failedWriteRepairUi.schedule,
         isAppActive: () => true,
         async runFullSync() {},
-        async runRecordSync(snapshot, habitIds) {
+        async runRecordSync(habitIds) {
           failedWriteRepairCalls.push(
-            `record:${snapshot}:${habitIds.join(",")}`,
+            `record:${habitIds.join(",")}`,
           );
         },
         async runLocalizationRefresh() {},
@@ -2480,8 +2711,8 @@ async function auditDeferredReminderCoordinator(): Promise<void> {
     // Exact recovery race: an older mark/unmark reached SQLite but skipped its
     // reminder side effect after being superseded; each latest intent then
     // failed and reloaded authoritative records before requesting this repair.
-    failedWriteRepairCoordinator.scheduleRecordSync(30, 7);
-    failedWriteRepairCoordinator.scheduleRecordSync(31, 7);
+    failedWriteRepairCoordinator.scheduleRecordSync(7);
+    failedWriteRepairCoordinator.scheduleRecordSync(7);
     assert.equal(
       failedWriteRepairUi.scheduled.length,
       1,
@@ -2490,8 +2721,8 @@ async function auditDeferredReminderCoordinator(): Promise<void> {
     await failedWriteRepairCoordinator.flushAndWait();
     assert.deepEqual(
       failedWriteRepairCalls,
-      ["record:31:7"],
-      "authoritative failed-write repairs must coalesce to the latest habit snapshot",
+      ["record:7"],
+      "authoritative failed-write repairs must share one habit admission",
     );
   }
 }
@@ -2501,14 +2732,14 @@ async function auditBackgroundReminderAdmission(): Promise<void> {
   const calls: string[] = [];
   let appActive = true;
   const errors: unknown[] = [];
-  const coordinator = new DeferredReminderWorkCoordinator<number>({
+  const coordinator = new DeferredReminderWorkCoordinator({
     scheduleAfterUiSettles: ui.schedule,
     isAppActive: () => appActive,
-    async runFullSync(snapshot) {
-      calls.push(`full:${snapshot}`);
+    async runFullSync() {
+      calls.push("full");
     },
-    async runRecordSync(snapshot, habitIds) {
-      calls.push(`record:${snapshot}:${habitIds.join(",")}`);
+    async runRecordSync(habitIds) {
+      calls.push(`record:${habitIds.join(",")}`);
     },
     async runLocalizationRefresh() {
       calls.push("localization");
@@ -2518,29 +2749,29 @@ async function auditBackgroundReminderAdmission(): Promise<void> {
     },
   });
 
-  coordinator.scheduleFullSync(1);
+  coordinator.scheduleFullSync();
   assert.equal(ui.scheduled.length, 1);
   appActive = false;
   coordinator.startAcceptedWorkNow();
   await coordinator.flushAndWait();
-  assert.deepEqual(calls, ["full:1"]);
+  assert.deepEqual(calls, ["full"]);
   assert.equal(
     ui.scheduled[0]?.cancelled,
     true,
     "background transition must cancel the frame-dependent callback",
   );
 
-  coordinator.scheduleRecordSync(2, 9);
+  coordinator.scheduleRecordSync(9);
   coordinator.scheduleLocalizationRefresh();
   await coordinator.flushAndWait();
-  assert.deepEqual(calls, ["full:1", "record:2:9", "localization"]);
+  assert.deepEqual(calls, ["full", "record:9", "localization"]);
   assert.equal(
     ui.scheduled.length,
     1,
     "work accepted after background must start without a RAF dependency",
   );
 
-  const synchronousFailure = new DeferredReminderWorkCoordinator<number>({
+  const synchronousFailure = new DeferredReminderWorkCoordinator({
     scheduleAfterUiSettles: ui.schedule,
     isAppActive: () => false,
     runFullSync() {
@@ -2552,7 +2783,7 @@ async function auditBackgroundReminderAdmission(): Promise<void> {
       errors.push(error);
     },
   });
-  synchronousFailure.scheduleFullSync(3);
+  synchronousFailure.scheduleFullSync();
   await synchronousFailure.flushAndWait();
   assert.equal(
     errors.length,
@@ -2621,12 +2852,12 @@ async function auditQuiescentFreezeHasNoAdmissionGap(): Promise<void> {
   const gate = new ReminderReplacementGate((error) => {
     throw error;
   });
-  const coordinator = new DeferredReminderWorkCoordinator<number>({
+  const coordinator = new DeferredReminderWorkCoordinator({
     scheduleAfterUiSettles: ui.schedule,
     isAppActive: () => true,
-    async runFullSync(snapshot) {
+    async runFullSync() {
       await gate.run(async () => {
-        calls.push(`full:${snapshot}`);
+        calls.push("full");
       });
     },
     async runRecordSync() {},
@@ -2636,7 +2867,7 @@ async function auditQuiescentFreezeHasNoAdmissionGap(): Promise<void> {
     },
   });
 
-  coordinator.scheduleFullSync(1);
+  coordinator.scheduleFullSync();
   let boundary: ReturnType<ReminderReplacementGate["enter"]> | null = null;
   await coordinator.flushAndWait(() => {
     boundary = gate.enter();
@@ -2644,12 +2875,12 @@ async function auditQuiescentFreezeHasNoAdmissionGap(): Promise<void> {
       calls.push("late");
     });
   });
-  assert.deepEqual(calls, ["full:1"]);
+  assert.deepEqual(calls, ["full"]);
   assert.ok(boundary);
   await gate.release(boundary, "import-committed");
   assert.deepEqual(
     calls,
-    ["full:1"],
+    ["full"],
     "work accepted at the quiescent boundary must not slip into old native state",
   );
 }
@@ -2661,7 +2892,7 @@ async function auditDeferredWorkAcceptedDuringDrain(): Promise<void> {
     releaseFull = resolve;
   });
   const calls: string[] = [];
-  const coordinator = new DeferredReminderWorkCoordinator<number>({
+  const coordinator = new DeferredReminderWorkCoordinator({
     scheduleAfterUiSettles: ui.schedule,
     isAppActive: () => true,
     async runFullSync() {
@@ -2678,7 +2909,7 @@ async function auditDeferredWorkAcceptedDuringDrain(): Promise<void> {
     },
   });
 
-  coordinator.scheduleFullSync(1);
+  coordinator.scheduleFullSync();
   const fence = coordinator.flushAndWait();
   await Promise.resolve();
   coordinator.scheduleLocalizationRefresh();
@@ -3031,6 +3262,7 @@ void Promise.race([
     await auditDeniedReminderCleanup();
     await auditReminderCivilDateRefill();
     await auditReminderSameDayCapacity();
+    await auditReminderAdmissionOwnership();
     await auditNotificationAdapterBehavior();
     console.log("Reminder sync audit passed.");
   })(),

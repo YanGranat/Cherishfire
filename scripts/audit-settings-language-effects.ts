@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { withAuditDeadline } from "./fixtures/with-audit-deadline";
 import { readFileSync } from "node:fs";
 import Module from "node:module";
 import { dirname, resolve } from "node:path";
@@ -235,7 +236,7 @@ export async function auditSettingsLanguageEffects(): Promise<void> {
   await auditReminderRegistrationThrow(controller, dependencies);
 }
 
-void auditSettingsLanguageEffects()
+void withAuditDeadline(auditSettingsLanguageEffects, "Settings language effects audit")
   .then(() => console.log("Settings language effects audit passed."))
   .catch((error) => {
     console.error(error);

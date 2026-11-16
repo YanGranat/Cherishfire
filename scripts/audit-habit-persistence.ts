@@ -16,6 +16,7 @@ import {
 } from "../src/application/habits/habit-persistence";
 import {
   capturePendingHabitWriteFence,
+  captureHabitScheduleWriteBarrier,
   getCurrentHabitWriteSequence,
   isHabitWriteProtectedByFence,
   releasePendingHabitWriteFence,
@@ -34,6 +35,8 @@ import {
   createHabitFixture,
 } from "./fixtures/habit-persistence-equivalence-fixtures";
 import type { DayRecord, Habit } from "../src/types/habit";
+import { areRepeatSchedulesEqual } from "../src/types/habit";
+import { calculateStreakStats } from "../src/domain/habits/streak";
 import {
   SQLITE_DELETE_BIND_CHUNK_SIZE,
   deleteSqliteRowsByValues,
@@ -1347,6 +1350,7 @@ async function assertSqliteReplacementIdentityLifetime(): Promise<void> {
 }
 
 async function main() {
+  await assertScheduleRecordCausality();
   await assertScheduleEquivalence();
   await assertOtherPersistenceProtocols();
   await assertBulkDisplayOrderProtocol();
@@ -1362,6 +1366,370 @@ async function main() {
   assertOutOfOrderEditablePatchOwnership();
   assertDependencyDirection();
   console.log("Habit persistence audit passed.");
+}
+
+async function assertScheduleRecordCausality(): Promise<void> {
+  const now = new Date();
+  const localDate = (offset: number) => {
+    const value = new Date(now);
+    value.setDate(value.getDate() + offset);
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+  };
+  const today = localDate(0);
+  const tomorrow = localDate(1);
+  const yesterday = localDate(-1);
+  const deferred = () => {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => { release = resolve; });
+    return { promise, release };
+  };
+  const detailSource = readFileSync("src/features/habit-detail/hooks/useHabitDetail.ts", "utf8");
+  const renderDetail = (
+    store: ReturnType<typeof loadHabitStoreForAudit>["storeModule"]["useHabitStore"],
+  ) => {
+    const slots: { value?: unknown; current?: unknown; dependencies?: unknown[] }[] = [];
+    let cursor = 0;
+    let dirty = false;
+    let effects: (() => void)[] = [];
+    const useState = (initial: unknown) => {
+      const index = cursor++;
+      slots[index] ??= { value: typeof initial === "function" ? initial() : initial };
+      return [slots[index].value, (update: unknown) => {
+        const previous = slots[index].value;
+        const next = typeof update === "function" ? update(previous) : update;
+        if (!Object.is(previous, next)) { slots[index].value = next; dirty = true; }
+      }];
+    };
+    const useRef = (initial: unknown) => {
+      const index = cursor++;
+      slots[index] ??= { current: initial };
+      return slots[index];
+    };
+    const useEffect = (effect: () => void, dependencies: unknown[]) => {
+      const index = cursor++;
+      const previous = slots[index]?.dependencies;
+      if (!previous || previous.length !== dependencies.length ||
+        dependencies.some((value, position) => !Object.is(value, previous[position]))) {
+        slots[index] = { dependencies };
+        effects.push(effect);
+      }
+    };
+    const hook = loadSourceCallableForAudit<typeof import("../src/features/habit-detail/hooks/useHabitDetail").useHabitDetail>(
+      detailSource, "useHabitDetail", {
+        useState, useRef, useEffect,
+        useCallback: (callback: unknown) => callback,
+        useMemo: (factory: () => unknown) => factory(),
+        useCurrentLocalDate: () => today,
+        useHabitStore: Object.assign(
+          (select: (state: ReturnType<typeof store.getState>) => unknown) => select(store.getState()),
+          { getState: store.getState },
+        ),
+        getHabitDayRecordsForState: (state: { allDayRecords: DayRecord[] }, habitId: number) =>
+          state.allDayRecords.filter((record) => record.habitId === habitId),
+        habitsHaveSameVisibleState: loadSourceCallableForAudit(detailSource, "habitsHaveSameVisibleState", { areRepeatSchedulesEqual }),
+        calculateStreakStats,
+        peekStreakStats: () => null,
+        rememberStreakStats: () => {},
+      },
+    );
+    return () => {
+      for (let pass = 0; pass < 12; pass += 1) {
+        cursor = 0;
+        effects = [];
+        dirty = false;
+        const snapshot = hook(1);
+        effects.forEach((effect) => effect());
+        if (!dirty) return snapshot;
+      }
+      throw new Error("Detail projection did not settle");
+    };
+  };
+  const mutation = process.argv.find((argument) => argument.startsWith("--schedule-mutation="))?.split("=")[1];
+  const transform = (source: string) => {
+    const substitutions: Record<string, [string, string]> = {
+      "optimistic-owner": ["if (previewHabit) {", "if (false && previewHabit) {"],
+      "predecessor-order": ["await predecessorWrites;", "await Promise.resolve();"],
+      "schedule-pin": ["isHabitScheduleWriteRequired(ownership.habitId, ownership.writeSequence)", "false"],
+      "destructive-pin": ["retainDestructiveHabitScheduleWrite(ownership.writeSequence);", "void ownership.writeSequence;"],
+      "record-rebase": ["const nextAllDayRecords = replaceAllHabitRecords(\n            state.allDayRecords,\n            id,\n            persistedRecords,\n          );", "const nextAllDayRecords = state.allDayRecords;"],
+      "durable-validation": ["validateSchedule:\n          scheduleBarrier.hasPendingWrites ||\n          !isHabitScheduleWriteBarrierCurrent(scheduleBarrier)", "validateSchedule: false"],
+    };
+    if (!mutation) return source;
+    assert.ok(substitutions[mutation], "the schedule mutation must be known");
+    const [target, replacement] = substitutions[mutation];
+    const normalize = (value: string) => value.replace(/\r?\n/g, source.includes("\r\n") ? "\r\n" : "\n");
+    assert.equal(source.split(normalize(target)).length - 1, 1, "the schedule mutation target must be unique");
+    return source.replace(normalize(target), normalize(replacement));
+  };
+  const run = async (
+    startDate: string,
+    test: (context: {
+      store: ReturnType<typeof loadHabitStoreForAudit>["storeModule"]["useHabitStore"];
+      application: ReturnType<typeof createHabitPersistenceApplication>;
+      fixture: ReturnType<typeof loadSqliteRepositoriesForAudit>;
+      paints: ReturnType<typeof deferred>[];
+    }) => Promise<void>,
+  ) => {
+    const fixture = loadSqliteRepositoriesForAudit();
+    const application = createHabitPersistenceApplication(fixture.habits);
+    const paints: ReturnType<typeof deferred>[] = [];
+    const loaded = loadHabitStoreForAudit({ habits: [], records: [] }, {
+      transform,
+      waitForCommitOpportunity: () => paints.shift()?.promise ?? Promise.resolve(),
+    });
+    Object.assign(loaded.persistence.application, application);
+    const { id: _id, ...habit } = createHabitFixture({
+      startDate,
+      scheduleHistory: [{ effectiveFrom: startDate, startDate, repeatSchedule: { type: "daily" } }],
+    });
+    await application.createHabit({ habit, resolveDisplayOrderFromStorage: false });
+    const store = loaded.storeModule.useHabitStore;
+    await store.getState().loadHabits();
+    await store.getState().loadAllDayRecords();
+    await store.getState().loadDayRecords(today);
+    try {
+      await test({ store, application: loaded.persistence.application, fixture, paints });
+    } finally {
+      await fixture.runtime.whenIdle();
+      fixture.database.close();
+    }
+  };
+
+  for (const expanding of [false, true]) {
+    await run(expanding ? tomorrow : today, async ({ store, fixture }) => {
+      const detail = renderDetail(store);
+      detail();
+      const entered = deferred();
+      const commit = deferred();
+      const original = fixture.runtime.transaction;
+      let hold = true;
+      fixture.runtime.transaction = (task) => original(async (session) => {
+        const result = await task(session);
+        if (hold) { hold = false; entered.release(); await commit.promise; }
+        return result;
+      });
+      const schedule = store.getState().updateHabit(1, { startDate: expanding ? today : tomorrow });
+      await entered.promise;
+      const admittedStart = store.getState().habits[0].startDate;
+      const mark = store.getState().markDay(1, today, "done");
+      const admittedStatus = store.getState().allDayRecords[0]?.status;
+      const visible = detail();
+      commit.release();
+      await schedule;
+      assert.equal(admittedStart, expanding ? today : tomorrow,
+        "schedule admission must atomically publish the same plan to every consumer before commit");
+      if (expanding) {
+        assert.equal(admittedStatus, "done",
+          "a newly allowed day must accept its optimistic mark before schedule durability");
+      }
+      assert.equal(visible.habit?.startDate, admittedStart,
+        "Detail and Home must render the same admitted schedule version");
+      assert.equal(visible.records.some((record) => record.date === today), expanding);
+      assert.equal(await mark, expanding);
+      assert.equal((await fixture.habits.readDayRecordsForHabit(1)).length, Number(expanding));
+      assert.equal(store.getState().allDayRecords.length, Number(expanding));
+    });
+  }
+
+  await run(yesterday, async ({ store, fixture, paints }) => {
+    const paint = deferred();
+    paints.push(paint);
+    const mark = store.getState().markDay(1, today, "done");
+    const isoWeekday = now.getDay() === 0 ? 7 : now.getDay();
+    const schedule = store.getState().updateHabit(1, { repeatSchedule: { type: "weekdays", days: [isoWeekday] } });
+    paint.release();
+    assert.equal(await mark, true);
+    await schedule;
+    const durable = await fixture.habits.readHabit(1);
+    assert.equal(durable?.scheduleHistory?.at(-1)?.effectiveFrom, tomorrow,
+      "a previously admitted same-day mark must retain the tomorrow history boundary despite delayed paint");
+  });
+
+  await run(tomorrow, async ({ store, application, fixture, paints }) => {
+    const paint = deferred();
+    paints.push(paint);
+    const first = store.getState().updateHabit(1, { startDate: today });
+    const mark = store.getState().markDay(1, today, "done");
+    const second = store.getState().updateHabit(1, { startDate: yesterday });
+    paint.release();
+    await Promise.all([first, second]);
+    assert.equal(await mark, true, "a dependent mark must pin its accepted schedule version across a newer edit");
+    assert.equal((await fixture.habits.readDayRecordsForHabit(1))[0]?.date, today);
+    assert.equal((await application.readHabit(1))?.startDate, yesterday);
+  });
+
+  await run(tomorrow, async ({ store, application, paints }) => {
+    let writes = 0;
+    const persist = application.persistScheduleEdit;
+    application.persistScheduleEdit = (input) => { writes += 1; return persist(input); };
+    const paint = deferred();
+    paints.push(paint);
+    const first = store.getState().updateHabit(1, { startDate: today });
+    const second = store.getState().updateHabit(1, { startDate: yesterday });
+    paint.release();
+    await Promise.all([first, second]);
+    assert.equal(writes, 1, "an unused superseded schedule must still coalesce");
+    await store.getState().updateHabit(1, { startDate: today, description: "Practice" });
+    assert.equal(store.getState().habits[0].description, "Practice",
+      "partitioned mixed edits must not wait on their own parent command");
+  });
+
+  for (const failFirst of [false, true]) {
+    await run(today, async ({ store, fixture, paints }) => {
+      await store.getState().markDay(1, today, "failure", "Practice reason");
+      await fixture.notes.createNote({
+        habitId: 1,
+        date: today,
+        text: "Practice entry",
+        isFailureReason: false,
+        reasonType: null,
+        createdAt: now.getTime(),
+        updatedAt: now.getTime(),
+      });
+      if (failFirst) {
+        fixture.database.exec(`CREATE TRIGGER reject_first_schedule BEFORE UPDATE OF start_date ON habits WHEN NEW.start_date = '${tomorrow}' BEGIN SELECT RAISE(ABORT, 'First schedule rejected'); END`);
+      }
+      const paint = deferred();
+      paints.push(paint);
+      const first = store.getState().updateHabit(1, { startDate: tomorrow });
+      const firstOutcome = first.then(() => null, (error: unknown) => error);
+      const second = store.getState().updateHabit(1, { startDate: today });
+      paint.release();
+      await second;
+      assert.equal((await firstOutcome) instanceof Error, failFirst);
+      const durableRecords = await fixture.habits.readDayRecordsForHabit(1);
+      assert.equal(durableRecords.length, Number(failFirst),
+        "accepted destructive edits must persist before a reversal; failed edits must not delete history");
+      assert.deepEqual(store.getState().allDayRecords.map((record) => record.date), durableRecords.map((record) => record.date),
+        "a no-op successor must rebase records after its predecessor fails");
+      assert.equal(store.getState().dayRecords.length, durableRecords.length);
+      const notes = await fixture.notes.getNotesForHabit(1);
+      assert.equal(notes.filter((note) => note.reasonType === "failure").length, Number(failFirst));
+      assert.equal(notes.filter((note) => note.reasonType == null).length, 1,
+        "schedule pruning must preserve ordinary notes across both commit and rollback");
+    });
+  }
+
+  await run(today, async ({ store, fixture, paints }) => {
+    await store.getState().markDay(1, today, "done");
+    store.setState({ allDayRecords: [], allDayRecordsLoaded: false });
+    const paint = deferred();
+    paints.push(paint);
+    const first = store.getState().updateHabit(1, { startDate: tomorrow });
+    const second = store.getState().updateHabit(1, { startDate: today });
+    paint.release();
+    await Promise.all([first, second]);
+    assert.equal((await fixture.habits.readDayRecordsForHabit(1)).length, 0,
+      "incomplete history cannot establish that a superseded schedule is non-destructive");
+  });
+
+  await run(today, async ({ store, fixture, paints }) => {
+    await store.getState().markDay(1, today, "failure", "Initial reason");
+    const previousId = (await fixture.habits.readDayRecordsForHabit(1))[0].id;
+    const paint = deferred();
+    paints.push(paint);
+    const first = store.getState().updateHabit(1, { startDate: tomorrow });
+    const second = store.getState().updateHabit(1, { startDate: today });
+    const mark = store.getState().markDay(1, today, "minimum");
+    paint.release();
+    await Promise.all([first, second]);
+    assert.equal(await mark, true);
+    const persisted = await fixture.habits.readDayRecordsForHabit(1);
+    assert.equal(persisted[0]?.status, "minimum");
+    assert.notEqual(persisted[0]?.id, previousId,
+      "a later explicit mark is a new record, not restoration of the pruned record");
+    assert.equal(store.getState().allDayRecords[0]?.status, "minimum",
+      "an older prune acknowledgement must preserve a newer accepted mark overlay");
+    assert.equal((await fixture.notes.getNotesForHabit(1)).length, 0);
+  });
+
+  await run(yesterday, async ({ store, fixture, paints }) => {
+    await store.getState().markDay(1, today, "done");
+    const paint = deferred();
+    paints.push(paint);
+    const isoWeekday = now.getDay() === 0 ? 7 : now.getDay();
+    const schedule = store.getState().updateHabit(1, { repeatSchedule: { type: "weekdays", days: [isoWeekday] } });
+    const unmark = store.getState().unmarkDay(1, today);
+    paint.release();
+    await schedule;
+    assert.equal(await unmark, true);
+    assert.equal((await fixture.habits.readHabit(1))?.scheduleHistory?.at(-1)?.effectiveFrom, tomorrow,
+      "a later unmark must not rewrite the history boundary already accepted by a repeat edit");
+    assert.equal((await fixture.habits.readDayRecordsForHabit(1)).length, 0);
+    assert.equal(store.getState().allDayRecords.length, 0);
+  });
+
+  for (const originalStart of [tomorrow, yesterday]) {
+    await run(originalStart, async ({ store, fixture, paints }) => {
+      const detail = renderDetail(store);
+      detail();
+      if (originalStart === yesterday) {
+        await store.getState().markDay(1, yesterday, "done");
+      }
+      fixture.database.exec("CREATE TRIGGER reject_schedule BEFORE UPDATE OF start_date ON habits BEGIN SELECT RAISE(ABORT, 'Schedule rejected'); END");
+      const paint = deferred();
+      paints.push(paint);
+      const schedule = store.getState().updateHabit(1, { startDate: today });
+      const failure = schedule.then(() => null, (error: unknown) => error);
+      const mark = store.getState().markDay(1, today, "done");
+      assert.equal(detail().records.some((record) => record.date === today), true);
+      paint.release();
+      assert.ok((await failure) instanceof Error);
+      assert.equal(await mark, originalStart === yesterday,
+        "a dependent mark must be rejected when schedule rollback revokes its day");
+      const expectedDates = originalStart === yesterday ? [yesterday, today] : [];
+      assert.deepEqual(store.getState().allDayRecords.map((record) => record.date).sort(), expectedDates,
+        "schedule failure must reconcile its own pruning without losing a newer valid mark or retaining an invalid one");
+      assert.deepEqual((await fixture.habits.readDayRecordsForHabit(1)).map((record) => record.date).sort(), expectedDates);
+      assert.equal(store.getState().habits[0].startDate, originalStart);
+      assert.deepEqual(detail().records.map((record) => record.date).sort(), expectedDates,
+        "a failed dependent mark must leave no private Detail phantom after rollback");
+      assert.equal(store.getState().dayRecords.some((record) => record.date === today), originalStart === yesterday,
+        "rejected marks must also leave the current date projection without a phantom completion");
+    });
+  }
+
+  await run(tomorrow, async ({ application, fixture }) => {
+    await assert.rejects(application.markDay({ habitId: 1, date: today, status: "failure", reason: "Practice", now: now.getTime(), validateSchedule: true }),
+      /no longer available/);
+    assert.equal((await fixture.notes.getNotesForHabit(1)).length, 0,
+      "durable schedule rejection must not leave a reason note");
+  });
+
+  await run(tomorrow, async ({ store, fixture }) => {
+    const imported = normalizeImportData(buildExportJsonFromRows({
+      ...await fixture.transfers.readConsistentSnapshot(),
+      exportedAt: now.toISOString(),
+    }));
+    const fence = capturePendingHabitWriteFence();
+    const schedule = store.getState().updateHabit(1, { startDate: today });
+    const mark = store.getState().markDay(1, today, "done");
+    try {
+      await waitForPendingHabitWritesThrough(fence);
+      await fixture.transfers.replaceAndVerify(imported, (rows) => verifyRestoredImportRows(imported, rows));
+      store.getState().resetInMemoryCaches();
+      await store.getState().loadHabits({ mode: "committed-import" });
+      await store.getState().loadAllDayRecords();
+    } finally {
+      releasePendingHabitWriteFence(fence, { discardPostFence: true });
+    }
+    await schedule;
+    assert.equal(await mark, false);
+    assert.equal(store.getState().habits[0].startDate, tomorrow);
+    assert.equal(store.getState().allDayRecords.length, 0,
+      "an imported same identity must not inherit a dependent old-generation mark");
+    assert.equal(captureHabitScheduleWriteBarrier(1).hasPendingWrites, false);
+    assert.equal(captureHabitScheduleWriteBarrier(1).revision, 0,
+      "replacement must retire schedule revision metadata");
+  });
+
+  await run(tomorrow, async ({ store }) => {
+    await store.getState().updateHabit(1, { startDate: today });
+    assert.ok(captureHabitScheduleWriteBarrier(1).revision > 0);
+    await store.getState().deleteHabit(1);
+    assert.equal(captureHabitScheduleWriteBarrier(1).revision, 0,
+      "permanent deletion must retire schedule revision metadata");
+  });
 }
 
 let persistenceDeadline: ReturnType<typeof setTimeout>;

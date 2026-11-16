@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cherishfire",
     "slug": "cherishfire",
-    "version": "1.5.116",
+    "version": "1.5.117",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -15,7 +15,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.cherishfire.app",
-      "buildNumber": "200"
+      "buildNumber": "201"
     },
     "android": {
       "allowBackup": false,
@@ -25,7 +25,7 @@
       },
       "softwareKeyboardLayoutMode": "resize",
       "package": "com.cherishfire.app",
-      "versionCode": 200,
+      "versionCode": 201,
       "permissions": ["android.permission.POST_NOTIFICATIONS"],
       "blockedPermissions": [
         "android.permission.FOREGROUND_SERVICE",

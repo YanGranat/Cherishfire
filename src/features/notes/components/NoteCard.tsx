@@ -21,6 +21,7 @@ import { formatLocalizedDate } from "@/utils/date";
 import { radii } from "@/theme/tokens";
 import { mergeRecoveredDraft } from "@/utils/recovered-draft";
 import { getNoteEditorContentHeight } from "@/features/notes/utils/editor-visibility";
+import type { NoteEditorRowOwner, NoteEditorSession } from "@/features/notes/utils/note-editor-session";
 export interface NoteEditorGeometryTargets {
   noteId: number;
   editor: View | null;
@@ -34,7 +35,8 @@ export interface NoteEditorGeometryMetrics {
   heightBucket: number;
 }
 interface NoteCardProps {
-  note: Note;
+  note: Note & { clientMutationId: string };
+  editorSession: NoteEditorSession;
   recoveryDraft?: {
     sequence: number;
     text: string;
@@ -46,7 +48,9 @@ interface NoteCardProps {
     id: number,
     editing: boolean,
     saveDraft?: () => boolean,
+    owner?: NoteEditorRowOwner,
   ) => boolean | void;
+  onEditorUnmount?: (id: number, clientMutationId: string, owner: NoteEditorRowOwner) => void;
   onEditorReady?: (
     id: number,
     target: View | null,
@@ -80,33 +84,44 @@ function allocateNoteEditorGeometryRequestId(): number {
 // Card-style note with date and actions inside.
 function NoteCardComponent({
   note,
+  editorSession,
   recoveryDraft,
   onSave,
   onUnchangedSave,
   onDelete,
   onEditingChange,
+  onEditorUnmount,
   onEditorReady,
   onEditorGeometry,
 }: NoteCardProps) {
   const { t } = useTranslation();
-  const [editing, setEditing] = useState(false);
-  const [hasDraftText, setHasDraftText] = useState(note.text.trim().length > 0);
+  const editorOwner = useRef<NoteEditorRowOwner>({ live: false }).current;
+  useLayoutEffect(() => {
+    editorOwner.live = true;
+    return () => { editorOwner.live = false; };
+  }, [editorOwner]);
+  const initialDraft = useRef(editorSession.getDraft(note.clientMutationId)).current;
+  const initialText = initialDraft?.text ?? note.text;
+  const initialHeight = initialDraft?.viewportHeight ?? NOTE_LINE_HEIGHT;
+  const [editing, setEditing] = useState(initialDraft != null);
+  const [editorInitialText, setEditorInitialText] = useState(initialText);
+  const [hasDraftText, setHasDraftText] = useState(initialText.trim().length > 0);
   const [editorViewportHeight, setEditorViewportHeight] =
-    useState(NOTE_LINE_HEIGHT);
-  const editorViewportHeightRef = useRef(NOTE_LINE_HEIGHT);
+    useState(initialHeight);
+  const editorViewportHeightRef = useRef(initialHeight);
   const cardRef = useRef<View>(null);
   const inputRef = useRef<TextInput>(null);
   const editorViewportRef = useRef<View>(null);
   const actionsRef = useRef<View>(null);
-  const draftTextRef = useRef(note.text);
-  const draftBaseTextRef = useRef(note.text);
-  const hasDraftTextRef = useRef(note.text.trim().length > 0);
-  const editingRef = useRef(false);
+  const draftTextRef = useRef(initialText);
+  const draftBaseTextRef = useRef(initialDraft?.baseText ?? note.text);
+  const hasDraftTextRef = useRef(initialText.trim().length > 0);
+  const editingRef = useRef(initialDraft != null);
   const previousEditingRef = useRef(false);
   const focusFrameRef = useRef<number | null>(null);
   const readTextLayoutHeightRef = useRef(NOTE_LINE_HEIGHT);
-  const onEditingChangeRef = useRef(onEditingChange);
-  onEditingChangeRef.current = onEditingChange;
+  const onEditorUnmountRef = useRef(onEditorUnmount);
+  onEditorUnmountRef.current = onEditorUnmount;
   const pendingGeometryRef = useRef<{
     requestId: number;
     metrics: NoteEditorGeometryMetrics;
@@ -115,7 +130,7 @@ function NoteCardComponent({
   const lastEditMayShrinkRef = useRef(true);
   const latestGeometryRequestIdRef = useRef(0);
   const renderedNoteTextRef = useRef(note.text);
-  const appliedRecoverySequenceRef = useRef(0);
+  const appliedRecoverySequenceRef = useRef(initialDraft?.recoverySequence ?? 0);
   const cancelGeometryFrame = React.useCallback(() => {
     if (geometryFrameRef.current == null) return;
     cancelAnimationFrame(geometryFrameRef.current);
@@ -142,6 +157,7 @@ function NoteCardComponent({
     [cancelGeometryFrame, getEditorMetrics],
   );
   const publishEditorGeometry = React.useCallback(() => {
+    if (!editorOwner.live) return;
     const pending = pendingGeometryRef.current;
     if (!pending) return;
     pendingGeometryRef.current = null;
@@ -156,7 +172,7 @@ function NoteCardComponent({
       },
       pending.metrics,
     );
-  }, [note.id, onEditorGeometry]);
+  }, [editorOwner, note.id, onEditorGeometry]);
   const language = useVisualLanguage();
   const effectiveMode = useVisualEffectiveMode();
   const isDark = effectiveMode === "dark";
@@ -173,8 +189,8 @@ function NoteCardComponent({
         : null;
   useLayoutEffect(() => {
     renderedNoteTextRef.current = note.text;
-    // While the uncontrolled native editor is mounted, its visible text is
-    // the sole draft owner. An optimistic persistence rollback may replace
+    // The uncontrolled native editor mirrors the route-owned draft. A
+    // persistence rollback may replace
     // note.text with an older value, but it must never silently replace the
     // value that the user can still see and save.
     if (editingRef.current) return;
@@ -198,15 +214,19 @@ function NoteCardComponent({
   }, [editing]);
   useEffect(() => {
     return () => {
-      if (editingRef.current) onEditingChangeRef.current?.(note.id, false);
+      if (editingRef.current) {
+        onEditorUnmountRef.current?.(note.id, note.clientMutationId, editorOwner);
+      }
     };
-  }, [note.id]);
+  }, [editorOwner, note.clientMutationId, note.id]);
   const leaveEditing = React.useCallback(() => {
+    if (!editorOwner.live) return;
     if (!editingRef.current) return;
     editingRef.current = false;
-    onEditingChange?.(note.id, false);
+    editorSession.finish(note.clientMutationId);
+    onEditingChange?.(note.id, false, undefined, editorOwner);
     setEditing(false);
-  }, [note.id, onEditingChange]);
+  }, [editorOwner, editorSession, note.clientMutationId, note.id, onEditingChange]);
   const saveForEditorHandoff = React.useCallback(() => {
     if (!editingRef.current) return true;
     const trimmed = draftTextRef.current.trim();
@@ -225,13 +245,15 @@ function NoteCardComponent({
   }, [leaveEditing, note.id, onSave]);
   const enterEditing = React.useCallback(
     (initialDraft = note.text) => {
+      if (!editorOwner.live) return;
       if (editingRef.current) return;
-      const accepted = onEditingChange?.(note.id, true, saveForEditorHandoff);
+      const accepted = onEditingChange?.(note.id, true, saveForEditorHandoff, editorOwner);
       if (accepted === false) {
         return;
       }
-      // Initialize synchronously before mounting TextInput. defaultValue is read
-      // only on that mount and must agree with the ref used by Save/handoff.
+      // Keep the native input's initial value stable until it unmounts. The
+      // live draft is read separately by Save/handoff and recovery commands.
+      setEditorInitialText(initialDraft);
       draftTextRef.current = initialDraft;
       draftBaseTextRef.current = initialDraft;
       lastEditMayShrinkRef.current = true;
@@ -243,6 +265,14 @@ function NoteCardComponent({
       editingRef.current = true;
       editorViewportHeightRef.current = readTextLayoutHeightRef.current;
       setEditorViewportHeight(readTextLayoutHeightRef.current);
+      editorSession.begin({
+        clientMutationId: note.clientMutationId,
+        noteId: note.id,
+        text: initialDraft,
+        baseText: initialDraft,
+        recoverySequence: appliedRecoverySequenceRef.current,
+        viewportHeight: readTextLayoutHeightRef.current,
+      });
       // Notify the screen in the same tap batch so the composer is visually
       // collapsed as this editor mounts. The composer remains mounted until the
       // native focus transfer completes; unmounting the old Android focus owner
@@ -251,12 +281,19 @@ function NoteCardComponent({
     },
     [
       cancelGeometryFrame,
+      editorOwner,
+      editorSession,
+      note.clientMutationId,
       note.id,
       note.text,
       onEditingChange,
       saveForEditorHandoff,
     ],
   );
+  useLayoutEffect(() => {
+    if (initialDraft == null || !editingRef.current) return;
+    onEditingChange?.(note.id, true, saveForEditorHandoff, editorOwner);
+  }, [editorOwner, initialDraft, note.id, onEditingChange, saveForEditorHandoff]);
   useEffect(
     () => () => {
       cancelGeometryFrame();
@@ -284,6 +321,10 @@ function NoteCardComponent({
       nextDraft.split(/\r\n|\r|\n/).length <
         previousDraft.split(/\r\n|\r|\n/).length;
     draftTextRef.current = nextDraft;
+    editorSession.update(note.clientMutationId, {
+      text: nextDraft,
+      recoverySequence: recoveryDraft.sequence,
+    });
     const nextHasDraftText = nextDraft.trim().length > 0;
     hasDraftTextRef.current = nextHasDraftText;
     setHasDraftText(nextHasDraftText);
@@ -293,8 +334,9 @@ function NoteCardComponent({
       return;
     }
     enterEditing(nextDraft);
-  }, [enterEditing, note.text, recoveryDraft]);
+  }, [editorSession, enterEditing, note.clientMutationId, note.text, recoveryDraft]);
   const handleEditorFocus = () => {
+    if (!editorOwner.live) return;
     onEditorReady?.(note.id, cardRef.current, "focus");
     queueEditorGeometry(editorViewportHeightRef.current);
     publishEditorGeometry();
@@ -321,6 +363,7 @@ function NoteCardComponent({
     queueEditorGeometry,
   ]);
   const handleSave = () => {
+    if (!editorOwner.live) return;
     const trimmed = draftTextRef.current.trim();
     if (!trimmed) return;
     if (trimmed === renderedNoteTextRef.current) {
@@ -341,12 +384,14 @@ function NoteCardComponent({
     enterEditing();
   };
   const handleTextChange = (value: string) => {
+    if (!editorOwner.live) return;
     const previousValue = draftTextRef.current;
     lastEditMayShrinkRef.current =
       value.length < previousValue.length ||
       value.split(/\r\n|\r|\n/).length <
         previousValue.split(/\r\n|\r|\n/).length;
     draftTextRef.current = value;
+    editorSession.update(note.clientMutationId, { text: value });
     cancelGeometryFrame();
     geometryFrameRef.current = requestAnimationFrame(() => {
       geometryFrameRef.current = null;
@@ -368,6 +413,7 @@ function NoteCardComponent({
   const handleEditorContentSizeChange = (
     event: NativeSyntheticEvent<TextInputContentSizeChangeEventData>,
   ) => {
+    if (!editorOwner.live) return;
     const nativeHeight = event.nativeEvent.contentSize.height;
     const currentHeight = editorViewportHeightRef.current;
     const nextHeight = getNoteEditorContentHeight({
@@ -377,6 +423,7 @@ function NoteCardComponent({
       mayShrink: lastEditMayShrinkRef.current,
     });
     if (nextHeight == null) return;
+    editorSession.update(note.clientMutationId, { viewportHeight: nextHeight });
     if (nextHeight < currentHeight - 0.5) {
       lastEditMayShrinkRef.current = false;
     }
@@ -396,6 +443,7 @@ function NoteCardComponent({
     publishEditorGeometry();
   };
   const handleEditorLayout = () => {
+    if (!editorOwner.live) return;
     if (!editingRef.current) return;
     if (!pendingGeometryRef.current) {
       queueEditorGeometry(editorViewportHeightRef.current);
@@ -459,7 +507,7 @@ function NoteCardComponent({
             >
               <TextInput
                 ref={inputRef}
-                defaultValue={draftTextRef.current}
+                defaultValue={editorInitialText}
                 onChange={(event) => handleTextChange(event.nativeEvent.text)}
                 multiline
                 autoFocus
@@ -501,6 +549,7 @@ function NoteCardComponent({
           >
             <Pressable
               onPress={() => {
+                if (!editorOwner.live) return;
                 onDelete(note.id);
               }}
               accessibilityRole="button"

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { withAuditDeadline } from "./fixtures/with-audit-deadline";
 
 import {
   createPersistenceCommitScheduler,
@@ -189,4 +190,7 @@ async function main() {
   console.log("Persistence commit scheduler audit passed.");
 }
 
-void main();
+void withAuditDeadline(main, "Persistence commit scheduler audit").catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { runInNewContext } from "node:vm";
@@ -6,6 +7,7 @@ import ts from "typescript";
 import { getTableConfig, SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { dayRecords, habits, notes, settings } from "../src/db/schema";
 import { createSerialTaskQueue } from "../src/utils/serial-task-queue";
+import { withAuditDeadline } from "./fixtures/with-audit-deadline";
 const ROOT = path.resolve(__dirname, "..");
 const SOURCE_ROOTS = [path.join(ROOT, "app"), path.join(ROOT, "src")];
 const ALLOWED_CLIENT_IMPORTS = new Set([
@@ -495,6 +497,24 @@ async function auditDatabaseFacade(sourceOverride?: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  for (const [mode, expectedStatus, expectedOutput] of [
+    ["resolve", 0, /Worker audit completed\./],
+    ["reject", 1, /Rejected audit task/],
+    ["throw", 1, /Thrown audit task/],
+    ["pending", 1, /Worker audit did not reach completion/],
+  ] as const) {
+    const worker = spawnSync(
+      process.execPath,
+      [...process.execArgv, path.join(ROOT, "scripts/fixtures/async-audit-worker.ts"), mode],
+      { cwd: ROOT, encoding: "utf8", timeout: 5_000 },
+    );
+    assert.equal(worker.error, undefined);
+    assert.equal(worker.status, expectedStatus, `${mode}: ${worker.stderr}`);
+    assert.match(worker.stdout + worker.stderr, expectedOutput);
+    if (mode !== "resolve") {
+      assert.doesNotMatch(worker.stdout, /Worker audit completed\./);
+    }
+  }
   auditDatabaseOwnership();
   auditMigrationMetadata();
   await auditSerialQueue();
@@ -540,7 +560,7 @@ async function main(): Promise<void> {
   }
   console.log("Database runtime audit passed.");
 }
-void main().catch((error) => {
+void withAuditDeadline(main, "Database runtime audit").catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });

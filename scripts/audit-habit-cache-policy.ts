@@ -576,8 +576,9 @@ assert.match(
 assertOrdered(
   actionSlice("  async updateHabit", "  async renameHabit"),
   [
-    "// Habit detail has already published the complete schedule preview.",
+    "// Every interactive consumer now observes the same complete schedule plan.",
     "await persistenceCommitScheduler.waitForCommitOpportunity();",
+    "await predecessorWrites;",
     "await waitForHabitPersistenceTurn(ownership.writeSequence)",
     '!shouldPersistHabitMutation(ownership, "schedule")',
     "habitPersistence.persistScheduleEdit({",
