@@ -7,6 +7,8 @@ import { subMonths } from "date-fns/subMonths";
 import { format } from "date-fns/format";
 import { getDatePickerMonthModel } from "../src/features/habit-form/utils/date-picker-month-model";
 import { toCivilDate } from "../src/utils/date";
+import { createMonthlyDateDraftStore } from "../src/features/habit-form/utils/monthly-date-draft";
+import { darkTheme, lightTheme } from "../src/theme/colors";
 
 interface Element {
   type: unknown;
@@ -226,6 +228,95 @@ function auditDateControls(source: string): void {
 auditCreateHeader(createSource);
 auditDateControls(dateSource);
 auditMonthlyLabels(repeatSource);
+function auditRepeatTouchTarget(source: string): void {
+  const fixture = createRenderFixture();
+  let applied: unknown;
+  const content = loadRender(source, "RepeatSheetContent", {
+    React: fixture.react, ...fixture.react,
+    View: "View", Text: "Text", Pressable: "Pressable", ScrollView: "ScrollView",
+    KeyboardAvoidingView: "KeyboardAvoidingView", Platform: { OS: "android" },
+    RepeatDaysTab: "Days", RepeatMonthlyTab: "Monthly", RepeatIntervalTab: "Interval",
+    useTranslation: () => ({ t: (key: string) => key }),
+    useVisualColorScheme: () => "blue", useVisualEffectiveMode: () => "light",
+    getAccentScheme: () => ({ base: "#2D6CB0" }), lightTheme: {}, darkTheme: {},
+    useSafeAreaInsets: () => ({ bottom: 0 }), sizes: { rowHeight: 68 },
+    createRepeatDraft: loadRender(source, "createRepeatDraft", {}),
+    createMonthlyDateDraftStore,
+  });
+  const tree = fixture.render(content, { initialSchedule: { type: "daily" }, onApply: (value: unknown) => { applied = value; } });
+  const done = elements(tree).find((element) => element.props.accessibilityLabel === "repeat.done")!;
+  assert.ok(done);
+  assert.ok(done.props.hitSlop.top >= 9 && done.props.hitSlop.bottom >= 9);
+  done.props.onPress();
+  assert.equal((applied as { type: string }).type, "daily");
+}
+const repeatSheetSource = readFileSync("src/features/habit-form/components/RepeatSheet.tsx", "utf8");
+auditRepeatTouchTarget(repeatSheetSource);
+assert.throws(() => auditRepeatTouchTarget(repeatSheetSource.replace("top: 9, bottom: 9", "top: 0, bottom: 0")), { name: "AssertionError" });
+
+function auditRootErrorFallback(source: string): void {
+  const ast = ts.createSourceFile("layout.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  assert.ok(ast.statements.some((node) => ts.isFunctionDeclaration(node) && node.name?.text === "ErrorBoundary" && node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)), "Expo Router must discover the exported fallback");
+  for (const theme of ["dark", "light", "system"]) {
+    for (const system of ["dark", "light"]) {
+      const fixture = createRenderFixture();
+      let retried = 0;
+      const fallback = loadRender(source, "ErrorBoundary", {
+        React: fixture.react, ...fixture.react, StartupState: "StartupState",
+        useSettingsStore: (selector: (state: object) => unknown) => selector({ theme }),
+        useNativeColorMode: () => system, i18n: { t: (key: string) => key },
+      });
+      const tree = fixture.render(fallback, { error: new Error("Synthetic failure"), retry: () => { retried++; } });
+      assert.equal(tree.props.error, true);
+      assert.equal(tree.props.errorMessage, "common.dataErrorMessage");
+      assert.equal(tree.props.mode, theme === "system" ? system : theme);
+      tree.props.onRetry();
+      assert.equal(retried, 1);
+    }
+  }
+}
+const rootLayoutSource = readFileSync("app/_layout.tsx", "utf8");
+auditRootErrorFallback(rootLayoutSource);
+function auditStartupStatePalette(source: string): void {
+  for (const system of ["light", "dark"]) {
+    for (const mode of [undefined, "light", "dark"]) {
+      const fixture = createRenderFixture();
+      let nativeBar: boolean | undefined;
+      const startup = loadRender(source, "StartupState", {
+        React: fixture.react, ...fixture.react,
+        useLayoutEffect: (effect: () => void) => effect(),
+        useNativeColorMode: () => system,
+        setAndroidNavigationBarTheme: (value: boolean) => { nativeBar = value; },
+        View: "View", Text: "Text", Pressable: "Pressable", StatusBar: "StatusBar", ActivityIndicator: "Spinner",
+        darkTheme, lightTheme, i18n: { t: (key: string) => key },
+      });
+      const tree = fixture.render(startup, { error: true, mode });
+      const expectedDark = (mode ?? system) === "dark";
+      assert.equal(nativeBar, expectedDark, "native buttons must be styled during layout, not after paint");
+      assert.equal(elements(tree).find((node) => node.type === "StatusBar")!.props.style, expectedDark ? "light" : "dark");
+      assert.equal(style(elements(tree).find((node) => node.type === "View")!.props.style).backgroundColor, expectedDark ? darkTheme.background : lightTheme.background);
+    }
+  }
+}
+auditStartupStatePalette(rootLayoutSource);
+const startupDeclaration = ts.createSourceFile("layout.tsx", rootLayoutSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  .statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "StartupState")!;
+const startupSource = startupDeclaration.getText();
+for (const [target, replacement] of [
+  ["useLayoutEffect", "useEffect"],
+  ["(mode ?? systemColorScheme)", "systemColorScheme"],
+]) {
+  assert.ok(startupSource.includes(target));
+  assert.throws(() => auditStartupStatePalette(startupSource.replace(target, replacement)), { name: "AssertionError" });
+}
+for (const [target, replacement] of [
+  ["export function ErrorBoundary", "function ErrorBoundary"],
+  ['theme === "system" ? systemColorScheme : theme', 'systemColorScheme'],
+  ["void retry();", "void 0;"],
+]) {
+  assert.ok(rootLayoutSource.includes(target));
+  assert.throws(() => auditRootErrorFallback(rootLayoutSource.replace(target, replacement)), { name: "AssertionError" });
+}
 for (const [source, target, replacement, audit] of [
   [createSource, "flexShrink: 1, minWidth: 0", "flexShrink: 0, minWidth: 0", auditCreateHeader],
   [createSource, "cursorColor={accent}", 'cursorColor="#4D4D4D"', auditCreateHeader],
@@ -238,4 +329,78 @@ for (const [source, target, replacement, audit] of [
   assert.ok(source.includes(target));
   assert.throws(() => audit(source.replace(target, replacement)), { name: "AssertionError" });
 }
-console.log("UI forms audit passed: header constraints, input colors, date controls, monthly labels and seven mutations.");
+async function auditCreateLifecycle(source: string): Promise<void> {
+  for (const outcome of ["success", "failure", "unmount"] as const) {
+    let resolveWrite!: () => void;
+    let rejectWrite!: (error: Error) => void;
+    const write = new Promise<void>((resolve, reject) => {
+      resolveWrite = resolve;
+      rejectWrite = reject;
+    });
+    let writes = 0;
+    let navigations = 0;
+    let error: unknown = null;
+    let cleanup: (() => void) | undefined;
+    const hook = loadRender(source, "useCreateHabit", {
+      useRouter: () => ({ back: () => navigations++ }),
+      useHabitStore: (select: (store: object) => unknown) => select({
+        createHabit: () => { writes++; return write; },
+      }),
+      useCallback: (callback: unknown) => callback,
+      useRef: (current: unknown) => ({ current }),
+      useState: () => [null, (next: unknown) => { error = next; }],
+      useEffect: (effect: () => () => void) => { cleanup = effect(); },
+      console: { error() {} },
+    });
+    const input = { name: "Read", description: "A daily chapter" };
+    const result = hook();
+    const pending = result.create(input);
+    assert.equal(navigations, 0, "a pending write must not destroy the form draft");
+    const duplicate = result.create(input);
+    assert.equal(writes, 1);
+    assert.equal(await duplicate, false, "duplicate saves must not create two habits");
+    if (outcome === "failure") {
+      rejectWrite(new Error("Storage unavailable"));
+      assert.equal(await pending, false);
+      assert.equal(navigations, 0);
+      assert.equal(error, "create-failed", "the retained form must show a retryable error");
+      assert.deepEqual(input, { name: "Read", description: "A daily chapter" });
+      const retry = result.create(input);
+      assert.equal(writes, 2, "failure must release the duplicate-save guard");
+      assert.equal(await retry, false);
+    } else {
+      if (outcome === "unmount") cleanup!();
+      resolveWrite();
+      assert.equal(await pending, true);
+      assert.equal(navigations, outcome === "unmount" ? 0 : 1);
+      assert.equal(error, null);
+    }
+  }
+}
+
+async function auditCreatePersistence(): Promise<void> {
+  const source = readFileSync("src/features/habit-form/hooks/useCreateHabit.ts", "utf8");
+  await auditCreateLifecycle(source);
+  for (const [target, replacement] of [
+    ["await createHabit(input);", "router.back(); await createHabit(input);"],
+    ["if (createInFlightRef.current)", "if (false)"],
+    ["if (isMountedRef.current) router.back();", "router.back();"],
+    ['if (isMountedRef.current) setError("create-failed");', "if (false) setError(null);"],
+  ]) {
+    assert.ok(source.includes(target));
+    await assert.rejects(auditCreateLifecycle(source.replace(target, replacement)), { name: "AssertionError" });
+  }
+}
+
+const createAuditDeadline = setTimeout(() => {
+  console.error("Habit creation audit did not settle");
+  process.exitCode = 1;
+}, 10_000);
+auditCreatePersistence().then(() => {
+  clearTimeout(createAuditDeadline);
+  console.log("UI forms audit passed: form geometry, date controls, repeat touch target, themed error recovery, durable creation, and behavioral fault checks.");
+}, (error: unknown) => {
+  clearTimeout(createAuditDeadline);
+  console.error(error);
+  process.exitCode = 1;
+});

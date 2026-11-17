@@ -3,6 +3,7 @@ import React from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { useRouter } from "expo-router";
 import { useTranslation } from "react-i18next";
+import { useIsFocused } from "@react-navigation/native";
 import { Icon } from "@/components/ui/Icon";
 import { Toggle } from "@/components/ui/Toggle";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -18,6 +19,7 @@ import { SettingsErrorBanner } from "@/features/settings/components/SettingsErro
 import { SettingsScreenShell } from "@/features/settings/components/SettingsScreenShell";
 import { FocusedRouteModuleWarmup } from "@/components/FocusedRouteModuleWarmup";
 import { useNavigationIntentGate } from "@/hooks/useNavigationIntentGate";
+import { ReminderPermissionNotice } from "@/features/reminders/components/ReminderPermissionNotice";
 const SETTINGS_ROUTE_MODULE_WARMUPS = [
   { route: "/settings/theme", load: () => import("./theme") },
   { route: "/settings/color-scheme", load: () => import("./color-scheme") },
@@ -168,7 +170,6 @@ function SettingsToggleRow({
         {icon}
         <Text
           className="ml-[9px] flex-shrink text-primary text-base"
-          numberOfLines={multiline ? 2 : undefined}
         >
           {label}
         </Text>
@@ -196,17 +197,25 @@ function SoundSettingsRow() {
 }
 function ReminderSettingsRow() {
   const { t } = useTranslation();
+  const focused = useIsFocused();
   const value = useSettingsStore((state) => state.reminderNotificationsEnabled);
   const setValue = useSettingsStore(
     (state) => state.setReminderNotificationsEnabled,
   );
   return (
-    <SettingsToggleRow
-      label={t("settings.reminders")}
-      icon={<Icon name="notifications-active" size={20} variant="primary" />}
-      value={value}
-      onValueChange={setValue}
-    />
+    <>
+      <SettingsToggleRow
+        label={t("settings.reminders")}
+        icon={<Icon name="notifications-active" size={20} variant="primary" />}
+        value={value}
+        onValueChange={setValue}
+      />
+      {value ? (
+        <View style={{ paddingHorizontal: 16 }}>
+          <ReminderPermissionNotice observePermission={focused} />
+        </View>
+      ) : null}
+    </>
   );
 }
 function FailureReasonSettingsRow() {

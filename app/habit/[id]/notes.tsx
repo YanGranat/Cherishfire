@@ -54,6 +54,7 @@ import { parseHabitRouteId } from "@/domain/habits/route-id";
 import { notesApplication, type NotesSessionNote } from "@/composition/notes";
 import { useHabitStore } from "@/stores/habit-store";
 import { NoteEditorSession, type NoteEditorRowOwner } from "@/features/notes/utils/note-editor-session";
+import { UnsavedNotesGuard } from "@/features/notes/components/UnsavedNotesGuard";
 interface PageMeasurable {
   measure: (
     callback: (
@@ -207,6 +208,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
     setEditorSession(new NoteEditorSession(notesSnapshot.generation));
   }
   const habitExists = notesSnapshot.habitExists;
+  const [hasComposerDraft, setHasComposerDraft] = useState(false);
   const isLoading =
     notesSnapshot.habitExists == null &&
     (notesSnapshot.status === "idle" || notesSnapshot.status === "loading");
@@ -335,6 +337,8 @@ function NotesScreen({ habitId }: { habitId: number }) {
   const keyboardVisibleRef = useRef(keyboardVisible);
   keyboardVisibleRef.current = keyboardVisible;
   const hideComposer = editingNoteIds.size > 0 || composerReleasePending;
+  const editorBottomPadding =
+    editorKeyboardLift + (hideComposer && !keyboardVisible ? insets.bottom : 0);
   const extendEditorPainting = Platform.OS === "android" && editingNoteIds.size > 0;
   const getKnownHabitExists = useCallback(() => {
     const habitState = useHabitStore.getState();
@@ -1003,6 +1007,18 @@ function NotesScreen({ habitId }: { habitId: number }) {
     },
     [scheduleEditorGeometry],
   );
+  const handleRecoveryApplied = useCallback(
+    (noteId: number, sequence: number) => {
+      if (!notesSession.acknowledgeRecovery(notesSnapshot.generation, sequence)) return;
+      setNoteRecoveryDrafts((current) => {
+        if (current.get(noteId)?.sequence !== sequence) return current;
+        const next = new Map(current);
+        next.delete(noteId);
+        return next;
+      });
+    },
+    [notesSession, notesSnapshot.generation],
+  );
   const renderNote = useCallback(
     ({ item }: ListRenderItemInfo<NotesSessionNote>) => (
       <NoteCard
@@ -1016,6 +1032,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
         onEditorReady={handleNoteEditorReady}
         onEditorGeometry={handleNoteEditorGeometry}
         recoveryDraft={noteRecoveryDrafts.get(item.id) ?? null}
+        onRecoveryApplied={handleRecoveryApplied}
       />
     ),
     [
@@ -1025,6 +1042,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
       handleNoteEditorGeometry,
       handleNoteEditorReady,
       handleSave,
+      handleRecoveryApplied,
       editorSession,
       noteRecoveryDrafts,
     ],
@@ -1080,12 +1098,23 @@ function NotesScreen({ habitId }: { habitId: number }) {
     measureNoteRoot();
   }, [measureNoteRoot]);
   useLayoutEffect(() => {
+    const currentSnapshot = notesSession.getSnapshot();
+    if (currentSnapshot.generation !== notesSnapshot.generation) return;
+    const unclaimedSequences = new Set(
+      currentSnapshot.presentationChanges
+        .filter((change) => change.kind === "rollback" && change.recoveryText != null)
+        .map((change) => change.sequence),
+    );
     for (const change of notesSnapshot.presentationChanges) {
-      if (change.sequence <= lastProcessedPresentationChangeRef.current) {
+      const unclaimedRecovery = change.kind === "rollback" && change.recoveryText != null && unclaimedSequences.has(change.sequence);
+      if (!unclaimedRecovery && change.sequence <= lastProcessedPresentationChangeRef.current) {
         continue;
       }
-      lastProcessedPresentationChangeRef.current = change.sequence;
-      if (change.kind !== "rollback" || change.recoveryText == null) continue;
+      lastProcessedPresentationChangeRef.current = Math.max(
+        lastProcessedPresentationChangeRef.current,
+        change.sequence,
+      );
+      if (!unclaimedRecovery || change.recoveryText == null) continue;
       const currentNote = noteList.find(
         (note) => note.clientMutationId === change.clientMutationId,
       );
@@ -1102,16 +1131,19 @@ function NotesScreen({ habitId }: { habitId: number }) {
         text: change.recoveryText,
       };
       if (change.source === "create") {
-        noteInputRef.current?.restoreDraft(recovery);
+        if (noteInputRef.current?.restoreDraft(recovery)) {
+          notesSession.acknowledgeRecovery(notesSnapshot.generation, change.sequence);
+        }
       } else if (change.source === "update" || change.source === "delete") {
         setNoteRecoveryDrafts((current) => {
+          if (current.get(change.noteId)?.sequence === recovery.sequence) return current;
           const next = new Map(current);
           next.set(change.noteId, recovery);
           return next;
         });
       }
     }
-  }, [noteList, notesSnapshot.presentationChanges]);
+  }, [hideComposer, noteList, notesSession, notesSnapshot.generation, notesSnapshot.presentationChanges]);
   return (
     <KeyboardAvoidingView
       cssInterop={false}
@@ -1209,7 +1241,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
           </Text>
         </View>
       ) : (
-        <NoteEditorViewport style={{ flex: 1, paddingBottom: editorKeyboardLift, overflow: "hidden" }}>
+        <NoteEditorViewport style={{ flex: 1, paddingBottom: editorBottomPadding, overflow: "hidden" }}>
         <FlatList
           ref={noteListRef}
           data={noteList}
@@ -1244,6 +1276,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
           hidden={hideComposer}
           keyboardVisible={keyboardVisible}
           extraKeyboardLift={composerKeyboardLift}
+          onDirtyChange={setHasComposerDraft}
         />
       ) : null}
 
@@ -1265,6 +1298,11 @@ function NotesScreen({ habitId }: { habitId: number }) {
             variant: "destructive",
           },
         ]}
+      />
+      <UnsavedNotesGuard
+        editorSession={editorSession}
+        hasComposerDraft={hasComposerDraft}
+        enabled={habitExists === true}
       />
     </KeyboardAvoidingView>
   );

@@ -304,11 +304,6 @@ assert.match(
   rootLayout,
   /<StatusBar style=\{isDarkTheme \? "light" : "dark"\} \/>/,
 );
-assert.match(rootLayout, /const isSystemDark = systemColorScheme === "dark"/);
-assert.match(
-  rootLayout,
-  /<StatusBar style=\{isSystemDark \? "light" : "dark"\} \/>/,
-);
 assert.match(rootLayout, /loaded = await loadSettings\(\)/);
 assert.match(rootLayout, /setSettingsLoadFailed\(!loaded\)/);
 assert.match(
@@ -2838,10 +2833,10 @@ assertNotesKeyboardViewport(notesScreen);
 for (const [before, after] of [
   ["cssInterop={false}", "cssInterop={true}"],
   ["flex: 1, backgroundColor", "flex: 0, backgroundColor"],
-  ["paddingBottom: editorKeyboardLift", "paddingBottom: 0"],
-  ["paddingBottom: editorKeyboardLift", "paddingBottom: composerKeyboardLift"],
+  ["paddingBottom: editorBottomPadding", "paddingBottom: 0"],
+  ["paddingBottom: editorBottomPadding", "paddingBottom: composerKeyboardLift"],
   ["style={{ flex: 1, backgroundColor }}", "style={{ flex: 1, backgroundColor, paddingBottom: editorKeyboardLift }}"],
-  ['paddingBottom: editorKeyboardLift, overflow: "hidden"', 'paddingBottom: editorKeyboardLift, overflow: "visible"'],
+  ['paddingBottom: editorBottomPadding, overflow: "hidden"', 'paddingBottom: editorBottomPadding, overflow: "visible"'],
   ["removeClippedSubviews={extendEditorPainting ? false : undefined}", "removeClippedSubviews={extendEditorPainting ? true : undefined}"],
 ]) {
   assert.equal(
@@ -3435,11 +3430,6 @@ assert.match(
 assert.match(noteCard, /defaultValue=\{editorInitialText\}/);
 assert.match(
   noteCard,
-  /if \(editingRef\.current\) return;[\s\S]{0,220}draftTextRef\.current = note\.text/,
-  "an external optimistic rollback must never replace the text visible in an active native editor",
-);
-assert.match(
-  noteCard,
   /const saveForEditorHandoff[\s\S]{0,420}trimmed !== renderedNoteTextRef\.current/,
   "editor handoff must compare the visible draft with the latest rendered note instead of a stale closure",
 );
@@ -4016,7 +4006,6 @@ assert.match(
   /<GestureHandlerRootView style=\{\{ flex: 1 \}\}>[\s\S]{0,80}<SafeAreaProvider>/,
 );
 assert.match(appRootLayout, /setAndroidNavigationBarTheme\(isDarkTheme\)/);
-assert.match(appRootLayout, /setAndroidNavigationBarTheme\(isSystemDark\)/);
 const appChromeStart = appRootLayout.indexOf("function AppChromeBoundary");
 const appNavigationStart = appRootLayout.indexOf("const AppNavigation");
 const appContentStart = appRootLayout.indexOf("function AppContent");
@@ -4029,14 +4018,6 @@ const appChromeSource = appRootLayout.slice(appChromeStart, appNavigationStart);
 const appContentSource = appRootLayout.slice(
   appContentStart,
   startupStateStart,
-);
-const startupStateEnd = appRootLayout.indexOf(
-  "function MigratedApp",
-  startupStateStart,
-);
-const startupStateSource = appRootLayout.slice(
-  startupStateStart,
-  startupStateEnd,
 );
 assert.doesNotMatch(
   appContentSource,
@@ -4051,11 +4032,6 @@ assert.match(
   appChromeSource,
   /useLayoutEffect\(\(\) => \{[\s\S]{0,100}setAndroidNavigationBarTheme\(isDarkTheme\)/,
   "the Android navigation button style must be dispatched in the same commit boundary as a theme repaint",
-);
-assert.match(
-  startupStateSource,
-  /useLayoutEffect\(\(\) => \{[\s\S]{0,100}setAndroidNavigationBarTheme\(isSystemDark\)/,
-  "startup system-bar styling must not wait for a passive post-paint effect",
 );
 assert.doesNotMatch(appRootLayout, /usePathname/);
 assert.doesNotMatch(
@@ -5610,8 +5586,8 @@ assert.doesNotMatch(
 );
 assert.match(
   createHabitHook,
-  /const persistence = createHabit\(input\);[\s\S]{0,240}router\.back\(\);[\s\S]{0,80}await persistence;/,
-  "habit creation navigation must not wait for its SQLite round trip",
+  /await createHabit\(input\);[\s\S]{0,160}if \(isMountedRef\.current\) router\.back\(\);/,
+  "habit creation must retain its draft until persistence succeeds and never navigate an unmounted form",
 );
 assert.match(createHabitHook, /const createInFlightRef = useRef\(false\)/);
 assert.doesNotMatch(

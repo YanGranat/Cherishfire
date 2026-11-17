@@ -33,7 +33,7 @@ const WEEKDAY_LABELS: Record<SupportedLanguage, string[]> = {
   ru: ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"],
   en: ["MO", "TU", "WE", "TH", "FR", "SA", "SU"],
   uk: ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "НД"],
-  es: ["LU", "MA", "MI", "JU", "VI", "SA", "DO"],
+  es: ["LU", "MA", "MI", "JU", "VI", "SÁ", "DO"],
   de: ["MO", "DI", "MI", "DO", "FR", "SA", "SO"],
   fr: ["LU", "MA", "ME", "JE", "VE", "SA", "DI"],
   it: ["LU", "MA", "ME", "GI", "VE", "SA", "DO"],

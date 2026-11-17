@@ -11,6 +11,7 @@ import {
 import type {
   ReminderDeferredWorkHandle,
   ReminderNotificationPort,
+  ReminderPermissionStatus,
   ScheduledHabitReminder,
 } from "../src/application/reminders/reminder-ports";
 import { ReminderReplacementGate } from "../src/application/reminders/reminder-replacement-gate";
@@ -25,9 +26,18 @@ import { buildReminderSyncSignature } from "../src/domain/reminders/reminder-syn
 import { removeReminderTimeIntent } from "../src/domain/reminders/reminder-time";
 import {
   createReminderNotificationAdapter,
+  ANDROID_PENDING_REMINDER_LIMIT,
   IOS_PENDING_REMINDER_LIMIT,
   type ReminderNotificationsNativeModule,
 } from "../src/platform/notifications/reminder-notification-adapter-core";
+import {
+  createReminderSchedulingJournal,
+  type ReminderSchedulingJournal,
+} from "../src/platform/notifications/reminder-scheduling-journal";
+import {
+  createReminderPermissionStatusStore,
+  withReminderPermissionStatusRefresh,
+} from "../src/application/reminders/reminder-permission-status";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 
@@ -494,6 +504,9 @@ function createReminderServiceHarness(options?: {
     async hasPermission() {
       permissionCount += 1;
       return permissionGranted;
+    },
+    async readPermissionStatus() {
+      return permissionGranted ? "granted" : "denied";
     },
     async requestPermission() {
       permissionRequestCount += 1;
@@ -982,6 +995,20 @@ async function auditReminderServiceBehavior(): Promise<void> {
     globallyLimitedFirstSchedule > globallyLimitedLastCancel,
     "the global iOS replacement must cancel every old active request before installing the new 64-slot plan",
   );
+
+  const androidLimited = createReminderServiceHarness({
+    pendingReminderLimit: ANDROID_PENDING_REMINDER_LIMIT,
+  });
+  androidLimited.service.scheduleHabitRemindersSync(
+    Array.from({ length: 17 }, (_, index) => makeHabit({ id: index + 1 })),
+  );
+  await runDeferredReminderServiceWork(androidLimited.service);
+  assert.equal(androidLimited.scheduled.length, ANDROID_PENDING_REMINDER_LIMIT);
+  assert.equal(new Set(androidLimited.scheduled.map((entry) => entry.habitId)).size, 17);
+  assert.ok(androidLimited.scheduled.every((entry, index, plan) =>
+    index === 0 || plan[index - 1].date.getTime() <= entry.date.getTime(),
+  ));
+  assert.equal(androidLimited.permissionRequestCount, 0);
 
   const scheduledBeforeLimitedRecordChange = globallyLimited.scheduled.length;
   globallyLimited.service.scheduleHabitReminderAfterRecordChange(
@@ -1961,10 +1988,27 @@ function createFakeNativeNotificationsModule(options?: {
   };
 }
 
+function createAdapterSchedulingDependencies() {
+  let sequence = 0;
+  let stored: readonly string[] = [];
+  return {
+    createNotificationIdentifier: () => `scheduled-${++sequence}`,
+    schedulingJournal: {
+      async read() {
+        return [...stored];
+      },
+      async write(identifiers: readonly string[]) {
+        stored = [...identifiers];
+      },
+    },
+  };
+}
+
 async function auditNotificationAdapterBehavior(): Promise<void> {
   let lazyLoadCount = 0;
   let fallbackOpenCount = 0;
   const listenerAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "android",
     async loadModule() {
       lazyLoadCount += 1;
@@ -2005,6 +2049,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
   let responseClearCount = 0;
   let responseRemoveCount = 0;
   const responseAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "android",
     async loadModule() {
       return createFakeNativeNotificationsModule({
@@ -2109,6 +2154,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
   let remountOpenCount = 0;
   let remountClearAttemptCount = 0;
   const remountAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "android",
     async loadModule() {
       return createFakeNativeNotificationsModule({
@@ -2155,6 +2201,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
   let overlappingClearCount = 0;
   let overlappingRemoveCount = 0;
   const overlappingAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "android",
     async loadModule() {
       return createFakeNativeNotificationsModule({
@@ -2238,6 +2285,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
   let boundedListener: NativeNotificationResponseListener | null = null;
   let boundedOpenCount = 0;
   const boundedAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "android",
     async loadModule() {
       return createFakeNativeNotificationsModule({
@@ -2295,6 +2343,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
 
   let callbackFailureClearCount = 0;
   const callbackFailureAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "android",
     async loadModule() {
       return createFakeNativeNotificationsModule({
@@ -2326,6 +2375,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
   let subscriberLoadRetryOpenCount = 0;
   let subscriberLoadRetryRemoveCount = 0;
   const subscriberLoadRetryAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "android",
     async loadModule() {
       subscriberLoadRetryCount += 1;
@@ -2389,6 +2439,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
   let listenerInstallRetryClearCount = 0;
   let listenerInstallRetryRemoveCount = 0;
   const listenerInstallRetryAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "android",
     async loadModule() {
       return createFakeNativeNotificationsModule({
@@ -2468,6 +2519,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
 
   let webLoadCount = 0;
   const webAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "web",
     async loadModule() {
       webLoadCount += 1;
@@ -2485,6 +2537,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
 
   let transientLoadCount = 0;
   const transientLoadAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "android",
     async loadModule() {
       transientLoadCount += 1;
@@ -2523,6 +2576,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
   let transientChannelLoadCount = 0;
   let transientChannelConfigureCount = 0;
   const transientChannelAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "android",
     async loadModule() {
       transientChannelLoadCount += 1;
@@ -2564,6 +2618,7 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
 
   let permissionRequests = 0;
   const provisionalAdapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
     platform: "ios",
     async loadModule() {
       return createFakeNativeNotificationsModule({
@@ -2588,14 +2643,359 @@ async function auditNotificationAdapterBehavior(): Promise<void> {
   );
   assert.equal(
     listenerAdapter.pendingReminderLimit,
-    null,
-    "the Android adapter must keep the established uncapped per-habit planner",
+    ANDROID_PENDING_REMINDER_LIMIT,
+    "the Android adapter must bound pending reminders to its native alarm budget",
   );
   assert.equal(
     permissionRequests,
     0,
     "iOS provisional authorization must remain sufficient without a prompt",
   );
+}
+
+async function auditAndroidReminderWorkAdmission(): Promise<void> {
+  for (const habitCount of [2, 17]) {
+    const harness = createReminderServiceHarness({
+      pendingReminderLimit: ANDROID_PENDING_REMINDER_LIMIT,
+      preserveScheduledState: true,
+    });
+    const habits = Array.from({ length: habitCount }, (_, index) => makeHabit({ id: index + 1 }));
+    harness.setNow(new Date(2029, 2, 8, 7, 30));
+    harness.service.scheduleHabitRemindersSync(habits);
+    await runDeferredReminderServiceWork(harness.service);
+    const before = {
+      scheduled: harness.scheduled.length,
+      cancelled: harness.cancelled.length,
+      recordReads: harness.recordReadCount,
+      listReads: harness.scheduledListReadCount,
+      yields: harness.yieldCount,
+    };
+    harness.setRecords([{ habitId: 1, date: "2029-03-08", status: "done" }]);
+    for (let index = 0; index < 100; index += 1) {
+      harness.service.scheduleHabitReminderAfterRecordChange(habits, 1);
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(harness.scheduled.length, before.scheduled);
+    assert.equal(harness.cancelled.length, before.cancelled, "record work must wait for the UI admission boundary");
+    await runDeferredReminderServiceWork(harness.service);
+    assert.equal(harness.recordReadCount - before.recordReads, 1);
+    assert.equal(harness.scheduledListReadCount - before.listReads, 1);
+    assert.equal(harness.cancelled.length - before.cancelled, 1);
+    assert.equal(harness.scheduled.length - before.scheduled, habitCount === 17 ? 1 : 0);
+    assert.ok(harness.yieldCount - before.yields <= habitCount + 6);
+    assert.equal(harness.maxNativeInFlight, 1);
+    assert.equal(harness.permissionRequestCount, 0);
+    const settledEvents = harness.nativeEvents.length;
+    await runDeferredReminderServiceWork(harness.service);
+    assert.equal(harness.nativeEvents.length, settledEvents, "settled reminder work must not leave another drain behind");
+  }
+}
+
+async function auditReminderPermissionStatus(): Promise<void> {
+  const originalWarn = console.warn;
+  const permissionWarnings: unknown[][] = [];
+  console.warn = (...args: unknown[]) => { permissionWarnings.push(args); };
+  try {
+  let nextStatus: ReminderPermissionStatus = "denied";
+  let readFailure = false;
+  let openFailure = false;
+  let reads = 0;
+  let opens = 0;
+  const status = createReminderPermissionStatusStore({
+    async readPermissionStatus() {
+      reads += 1;
+      if (readFailure) throw new Error("Permission read failed");
+      return nextStatus;
+    },
+    async openSystemSettings() {
+      opens += 1;
+      if (openFailure) throw new Error("Settings launch failed");
+    },
+  });
+  assert.equal(status.getSnapshot(), "unknown");
+  status.refreshIfObserved();
+  assert.equal(reads, 0, "unobserved permission state must not create background reads");
+  let notifications = 0;
+  const unsubscribe = status.subscribe(() => { notifications += 1; });
+  for (const expected of ["denied", "granted", "undetermined", "unavailable"] as const) {
+    nextStatus = expected;
+    await status.refresh();
+    assert.equal(status.getSnapshot(), expected);
+  }
+  readFailure = true;
+  await status.refresh();
+  assert.equal(status.getSnapshot(), "error", "read failure must never impersonate denied permission");
+  await status.refresh();
+  assert.equal(permissionWarnings.length, 1, "repeated permission read failures must emit one warning per error transition");
+  readFailure = false;
+  nextStatus = "granted";
+  await status.refresh();
+  const beforeSameStatus = notifications;
+  await status.refresh();
+  assert.equal(notifications, beforeSameStatus);
+  openFailure = true;
+  assert.equal(await status.openSystemSettings(), false);
+  assert.equal(status.getSnapshot(), "error");
+  assert.equal(permissionWarnings.length, 2);
+  openFailure = false;
+  assert.equal(await status.openSystemSettings(), true);
+  assert.equal(opens, 2);
+  await status.refresh();
+  assert.equal(status.getSnapshot(), "granted");
+  unsubscribe();
+  const beforeUnobserved = reads;
+  status.refreshIfObserved();
+  assert.equal(reads, beforeUnobserved);
+
+  let resolveOldRead!: (value: ReminderPermissionStatus) => void;
+  let oldRead = true;
+  let rejectOldOpen!: (error: Error) => void;
+  const latest = createReminderPermissionStatusStore({
+    readPermissionStatus() {
+      if (oldRead) {
+        oldRead = false;
+        return new Promise((resolve) => { resolveOldRead = resolve; });
+      }
+      return Promise.resolve("granted");
+    },
+    openSystemSettings() {
+      return new Promise((_, reject) => { rejectOldOpen = reject; });
+    },
+  });
+  const old = latest.refresh();
+  await latest.refresh();
+  resolveOldRead("denied");
+  await old;
+  assert.equal(latest.getSnapshot(), "granted", "late reads must not restore obsolete permission state");
+  const opening = latest.openSystemSettings();
+  assert.equal(latest.openSystemSettings(), opening, "rapid settings taps must share one native launch");
+  await latest.refresh();
+  rejectOldOpen(new Error("Late settings failure"));
+  assert.equal(await opening, false);
+  assert.equal(latest.getSnapshot(), "granted", "late settings errors must not overwrite a newer permission read");
+  assert.equal(permissionWarnings.length, 2, "stale permission failures must not emit current-state warnings");
+
+  let permissionRequests = 0;
+  const native = createFakeNativeNotificationsModule({ onPermissionRequest: () => { permissionRequests += 1; } });
+  const adapter = createReminderNotificationAdapter({
+    ...createAdapterSchedulingDependencies(),
+    platform: "android",
+    loadModule: async () => native,
+    copy: { channelName: () => "Reminders", notificationTitle: () => "Reminder", notificationBody: (name) => name },
+  });
+  for (const expected of ["denied", "undetermined", "granted"] as const) {
+    native.getPermissionsAsync = async () => ({ granted: expected === "granted", status: expected });
+    assert.equal(await adapter.readPermissionStatus(), expected);
+  }
+  native.getPermissionsAsync = async () => { throw new Error("Native permission unavailable"); };
+  await assert.rejects(adapter.readPermissionStatus(), /Native permission unavailable/);
+  assert.equal(permissionRequests, 0);
+
+  let refreshes = 0;
+  const observed = withReminderPermissionStatusRefresh(adapter, () => { refreshes += 1; });
+  const nativePermissionFailure = new Error("Permission request failed");
+  await assert.rejects(observed.requestPermission(), /Native permission unavailable/);
+  assert.equal(refreshes, 1);
+  native.getPermissionsAsync = async () => ({ granted: false, status: "denied" });
+  assert.equal(await observed.requestPermission(), false);
+  assert.equal(refreshes, 2);
+  native.requestPermissionsAsync = async () => { throw nativePermissionFailure; };
+  await assert.rejects(observed.requestPermission(), (error) => error === nativePermissionFailure);
+  assert.equal(refreshes, 3);
+
+  const notice = readProjectFile("src/features/reminders/components/ReminderPermissionNotice.tsx");
+  assert.match(notice, /status !== "denied" && status !== "error"/);
+  assert.match(notice, /status === "denied"[\s\S]*"reminderScreen.permissionBlocked"[\s\S]*"reminderScreen.permissionUnavailable"/);
+  assert.match(notice, /if \(!observePermission\) return;[\s\S]*AppState\.addEventListener\("change"[\s\S]*state === "active"/);
+  assert.match(notice, /disabled=\{!observePermission\}/);
+  assert.doesNotMatch(notice, /requestPermission|getPermissionsAsync|useSettingsStore/);
+  const settingsSource = readProjectFile("app/settings/index.tsx");
+  assert.match(settingsSource, /\{value \? \([\s\S]{0,160}ReminderPermissionNotice observePermission=\{focused\}/);
+  assert.match(reminderScreenSource, /\{enabled \? \([\s\S]{0,80}ReminderPermissionNotice observePermission=\{visible\}/);
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
+async function auditReminderSchedulingJournal(): Promise<void> {
+  type NativeRequest = Parameters<ReminderNotificationsNativeModule["scheduleNotificationAsync"]>[0];
+  const requests = new Map<string, { identifier: string; content: NativeRequest["content"] }>();
+  let persisted: readonly string[] | null = [];
+  let rejectNativeSchedule = true;
+  let rejectNativeCancel = false;
+  let rejectJournalRead = false;
+  let rejectJournalClear = false;
+  let permissionRequests = 0;
+  let scheduled = 0;
+  let sequence = 0;
+  const cancelled: string[] = [];
+  const nativeError = new Error("Native alarm admission failed");
+  const journalError = new Error("Journal update failed");
+  const journal: ReminderSchedulingJournal = {
+    async read() {
+      if (rejectJournalRead) throw journalError;
+      return persisted == null ? null : [...persisted];
+    },
+    async write(identifiers) {
+      if (rejectJournalClear && identifiers.length === 0) throw journalError;
+      persisted = [...identifiers];
+    },
+  };
+  const native = createFakeNativeNotificationsModule();
+  native.getAllScheduledNotificationsAsync = async () => [...requests.values()];
+  native.requestPermissionsAsync = async () => {
+    permissionRequests += 1;
+    return { granted: true };
+  };
+  native.scheduleNotificationAsync = async (request) => {
+    assert.deepEqual(persisted, [request.identifier], "write-ahead identity must precede native admission");
+    scheduled += 1;
+    requests.set(request.identifier, { identifier: request.identifier, content: request.content });
+    if (rejectNativeSchedule) throw nativeError;
+    return request.identifier;
+  };
+  native.cancelScheduledNotificationAsync = async (identifier) => {
+    if (rejectNativeCancel) throw new Error("Native cancellation failed");
+    cancelled.push(identifier);
+    requests.delete(identifier);
+  };
+  const createAdapter = () => createReminderNotificationAdapter({
+    platform: "android",
+    loadModule: async () => native,
+    createNotificationIdentifier: () => `request-${++sequence}`,
+    schedulingJournal: journal,
+    copy: { channelName: () => "Reminders", notificationTitle: () => "Reminder", notificationBody: (name) => name },
+  });
+  const input = { habitId: 9, habitName: "Practice", date: new Date(2029, 2, 8, 11, 0) };
+  const adapter = createAdapter();
+  await assert.rejects(adapter.scheduleHabitReminder(input), (error) => error === nativeError);
+  assert.equal(requests.size, 0);
+  assert.deepEqual(persisted, []);
+  assert.equal((await adapter.listScheduledHabitReminders()).size, 0);
+
+  rejectNativeCancel = true;
+  await assert.rejects(adapter.scheduleHabitReminder(input), (error) => error === nativeError);
+  assert.equal(requests.size, 1);
+  assert.deepEqual(persisted, ["request-2"]);
+  await assert.rejects(adapter.listScheduledHabitReminders(), /Native cancellation failed/);
+  assert.equal(requests.size, 1, "uncertain native requests must not be published as valid");
+  const restarted = createAdapter();
+  await assert.rejects(restarted.listScheduledHabitReminders(), /Native cancellation failed/);
+  rejectNativeCancel = false;
+  assert.equal((await restarted.listScheduledHabitReminders()).size, 0);
+  assert.deepEqual(persisted, []);
+
+  rejectNativeSchedule = false;
+  rejectJournalClear = true;
+  await assert.rejects(restarted.scheduleHabitReminder(input), (error) => error === journalError);
+  assert.equal(requests.size, 1, "native acceptance followed by journal failure retains its recovery identity");
+  assert.deepEqual(persisted, ["request-3"]);
+  rejectJournalClear = false;
+  const afterAcceptedRestart = createAdapter();
+  assert.equal((await afterAcceptedRestart.listScheduledHabitReminders()).size, 0);
+  assert.ok(cancelled.includes("request-3"));
+  await afterAcceptedRestart.scheduleHabitReminder(input);
+  assert.equal((await afterAcceptedRestart.listScheduledHabitReminders()).get(9)?.length, 1);
+  assert.deepEqual(persisted, []);
+
+  const foreignRequest = {
+    identifier: "foreign-request",
+    content: { data: { kind: "unrelated" } },
+  } as unknown as { identifier: string; content: NativeRequest["content"] };
+  requests.set(foreignRequest.identifier, foreignRequest);
+  persisted = null;
+  const afterCorruption = createAdapter();
+  assert.equal((await afterCorruption.listScheduledHabitReminders()).size, 0);
+  assert.deepEqual([...requests.keys()], ["foreign-request"]);
+  assert.ok(!cancelled.includes("foreign-request"));
+  assert.deepEqual(persisted, []);
+
+  persisted = ["foreign-request"];
+  assert.equal((await createAdapter().listScheduledHabitReminders()).size, 0);
+  assert.deepEqual([...requests.keys()], ["foreign-request"]);
+  assert.ok(!cancelled.includes("foreign-request"), "valid journal syntax must not authorize cancellation of a foreign native request");
+  assert.deepEqual(persisted, []);
+
+  rejectJournalRead = true;
+  const readFailure = createAdapter();
+  const scheduledBeforeReadFailure = scheduled;
+  await assert.rejects(readFailure.scheduleHabitReminder(input), (error) => error === journalError);
+  assert.equal(scheduled, scheduledBeforeReadFailure);
+  rejectJournalRead = false;
+  await readFailure.scheduleHabitReminder(input);
+  assert.deepEqual(persisted, []);
+  assert.equal(permissionRequests, 0, "journal recovery must never request notification permission");
+
+  let heldNativeResolve!: () => void;
+  let heldNativeStarted!: () => void;
+  const heldNativeStart = new Promise<void>((resolve) => { heldNativeStarted = resolve; });
+  const heldNative = new Promise<void>((resolve) => { heldNativeResolve = resolve; });
+  const scheduleNormally = native.scheduleNotificationAsync;
+  let holdFirst = true;
+  native.scheduleNotificationAsync = async (request) => {
+    if (holdFirst) {
+      holdFirst = false;
+      heldNativeStarted();
+      await heldNative;
+    }
+    return scheduleNormally(request);
+  };
+  const serial = createAdapter();
+  const first = serial.scheduleHabitReminder(input);
+  await heldNativeStart;
+  const second = serial.scheduleHabitReminder({ ...input, habitId: 10 });
+  await Promise.resolve();
+  const firstJournal = await journal.read();
+  const firstIdentifier = firstJournal?.[0];
+  assert.ok(firstIdentifier);
+  assert.equal(firstJournal?.length, 1);
+  heldNativeResolve();
+  await Promise.all([first, second]);
+  assert.deepEqual(persisted, []);
+  assert.notEqual(sequence, Number(firstIdentifier?.slice("request-".length)), "later scheduling must get its own journal identity");
+
+  let storedFile: string | null = null;
+  let fileReadFailure = false;
+  let fileWriteFailure = false;
+  let oversized = false;
+  const fileJournal = createReminderSchedulingJournal(async () => ({
+    documentDirectory: "file:///app/",
+    async getInfoAsync() { return { exists: storedFile != null, size: oversized ? 200_000 : storedFile?.length ?? 0 }; },
+    async readAsStringAsync() {
+      if (fileReadFailure) throw journalError;
+      return storedFile ?? "";
+    },
+    async writeAsStringAsync(_uri, value) {
+      if (fileWriteFailure) throw journalError;
+      storedFile = value;
+    },
+  }));
+  assert.deepEqual(await fileJournal.read(), []);
+  await fileJournal.write(["pending-a"]);
+  assert.deepEqual(await fileJournal.read(), ["pending-a"]);
+  storedFile = '["pending-a","pending-a"]';
+  assert.deepEqual(await fileJournal.read(), ["pending-a"]);
+  for (const invalid of ["", "{", "null", '[null]', '[""]']) {
+    storedFile = invalid;
+    assert.equal(await fileJournal.read(), null);
+  }
+  storedFile = "[]";
+  oversized = true;
+  assert.equal(await fileJournal.read(), null);
+  oversized = false;
+  fileReadFailure = true;
+  await assert.rejects(fileJournal.read(), (error) => error === journalError);
+  fileReadFailure = false;
+  fileWriteFailure = true;
+  await assert.rejects(fileJournal.write(["pending-b"]), (error) => error === journalError);
+  const unavailable = createReminderSchedulingJournal(async () => ({
+    documentDirectory: null,
+    async getInfoAsync() { return { exists: false }; },
+    async readAsStringAsync() { return ""; },
+    async writeAsStringAsync() {},
+  }));
+  await assert.rejects(unavailable.read(), /storage is unavailable/);
 }
 
 async function auditDeferredReminderCoordinator(): Promise<void> {
@@ -3264,6 +3664,9 @@ void Promise.race([
     await auditReminderSameDayCapacity();
     await auditReminderAdmissionOwnership();
     await auditNotificationAdapterBehavior();
+    await auditReminderSchedulingJournal();
+    await auditReminderPermissionStatus();
+    await auditAndroidReminderWorkAdmission();
     console.log("Reminder sync audit passed.");
   })(),
   auditTimeout,

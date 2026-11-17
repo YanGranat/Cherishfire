@@ -31,6 +31,7 @@ interface ColorRowProps {
   onSelect: (color: ColorScheme) => boolean;
   onEdit: (color: ColorScheme) => void;
   editHint: string;
+  editLabel: string;
 }
 const ColorListHeader = React.memo(function ColorListHeader() {
   return (
@@ -47,6 +48,7 @@ const ColorRow = React.memo(function ColorRow({
   onSelect,
   onEdit,
   editHint,
+  editLabel,
 }: ColorRowProps) {
   const longPressTriggeredRef = useRef(false);
   // Keep selection local so one accent change updates only the old and new
@@ -83,7 +85,7 @@ const ColorRow = React.memo(function ColorRow({
             onEdit(color);
           }}
           accessibilityRole="button"
-          accessibilityLabel={editHint}
+          accessibilityLabel={editLabel}
           hitSlop={10}
           style={{
             width: sizes.colorPreviewCircle,
@@ -318,6 +320,7 @@ export default function ColorSchemeScreen() {
     [colorRows],
   );
   const editHint = t("colorSchemeScreen.editHint");
+  const editColorLabel = t("colorSchemeScreen.editColor");
   const addColorLabel = t("colorSchemeScreen.addColor");
   const rightActions = useMemo(
     () => [
@@ -351,9 +354,10 @@ export default function ColorSchemeScreen() {
         onSelect={selectColor}
         onEdit={openEdit}
         editHint={editHint}
+        editLabel={`${editColorLabel}: ${item.label}`}
       />
     ),
-    [editHint, openEdit, selectColor],
+    [editColorLabel, editHint, openEdit, selectColor],
   );
   const colorRowKey = useCallback(
     (item: (typeof colorRows)[number]) => item.scheme,

@@ -1,10 +1,12 @@
-import { Platform } from "react-native";
+import { Linking, Platform } from "react-native";
+import { uuid } from "expo-modules-core";
 import type * as ExpoNotifications from "expo-notifications";
 import i18n from "@/i18n/config";
 import {
   createReminderNotificationAdapter,
   type ReminderNotificationsNativeModule,
 } from "@/platform/notifications/reminder-notification-adapter-core";
+import { createReminderSchedulingJournal } from "@/platform/notifications/reminder-scheduling-journal";
 
 type ExpoNotificationsModule = Pick<
   typeof ExpoNotifications,
@@ -75,6 +77,8 @@ async function importLocalNotificationsModule(): Promise<ExpoNotificationsModule
 export function createExpoReminderNotificationAdapter() {
   return createReminderNotificationAdapter({
     platform: Platform.OS,
+    createNotificationIdentifier: () => uuid.v4(),
+    schedulingJournal: createReminderSchedulingJournal(),
     loadModule: async () =>
       (await importLocalNotificationsModule()) as unknown as ReminderNotificationsNativeModule,
     copy: {
@@ -84,4 +88,8 @@ export function createExpoReminderNotificationAdapter() {
         i18n.t("reminderScreen.notificationBody", { name: habitName }),
     },
   });
+}
+
+export function openReminderSystemSettings(): Promise<void> {
+  return Linking.openSettings();
 }

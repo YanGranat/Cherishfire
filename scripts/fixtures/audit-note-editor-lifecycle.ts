@@ -4,7 +4,7 @@ import ts from "typescript";
 import { NoteEditorSession } from "../../src/features/notes/utils/note-editor-session";
 import { getNoteEditorContentHeight } from "../../src/features/notes/utils/editor-visibility";
 import { mergeRecoveredDraft } from "../../src/utils/recovered-draft";
-import type { NotesSessionNote } from "../../src/application/notes/notes-session";
+import type { NotesSessionNote, NotesSessionSnapshot } from "../../src/application/notes/notes-session";
 import type { NoteEditorCaretMetrics } from "../../src/platform/note-editor-metrics";
 import { loadSourceCallableForAudit } from "./load-source-callable-for-audit";
 
@@ -166,6 +166,7 @@ function createLifecycleHarness(sources: LifecycleSources = {}) {
     let saveAccepted = true;
     const saves: [number, string][] = [];
     const saveAttempts: [number, string][] = [];
+    const recoveries: [number, number][] = [];
     const geometry: {
       selectionAtEnd: boolean; requestId: number; targets: any;
       contentRevision: number; selectionStart: number | null; selectionEnd: number | null;
@@ -206,7 +207,7 @@ function createLifecycleHarness(sources: LifecycleSources = {}) {
     environment.handleNoteEditingChange = onEditingChange;
     const onEditorUnmount = loadSourceCallableForAudit<(...args: any[]) => void>(routeSource, "handleNoteEditorUnmount", environment);
     return {
-      editorSession, saves, geometry, onEditingChange, onEditorUnmount,
+      editorSession, saves, geometry, onEditingChange, onEditorUnmount, recoveries,
       getNote: (id: number) => { const value = notes.find((item) => item.id === id); assert.ok(value); return value; },
       getEditingIds: () => [...editingIds], getDismissals: () => dismissals,
       getPhysicalOwner: () => activeEditorSaveRef.current?.owner,
@@ -228,6 +229,7 @@ function createLifecycleHarness(sources: LifecycleSources = {}) {
         route.geometry.push({ ...metrics, requestId, targets });
       },
       recoveryDraft,
+      onRecoveryApplied: (noteId: number, sequence: number) => route.recoveries.push([noteId, sequence]),
     };
     let tree: Element;
     const render = () => {
@@ -264,8 +266,86 @@ function createLifecycleHarness(sources: LifecycleSources = {}) {
   };
 }
 
+function auditNotesRecoveryDelivery(routeSource: string): void {
+  const tree = ts.createSourceFile("notes.tsx", routeSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let cursorInitializer = "";
+  let recoveryEffect = "";
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(tree) === "lastProcessedPresentationChangeRef") {
+      cursorInitializer = node.initializer!.getText(tree);
+    }
+    if (ts.isCallExpression(node) && node.expression.getText(tree) === "useLayoutEffect" &&
+      node.arguments[0]?.getText(tree).includes("for (const change of notesSnapshot.presentationChanges)")) {
+      assert.equal(recoveryEffect, "", "the route must have one recovery delivery owner");
+      recoveryEffect = node.arguments[0].getText(tree);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  assert.ok(cursorInitializer && recoveryEffect);
+  for (const source of ["create", "update", "delete"] as const) {
+    const stored = note(1);
+    const snapshot: Pick<NotesSessionSnapshot, "generation" | "presentationChanges"> = {
+      generation: 4,
+      presentationChanges: [{ sequence: 1, kind: "rollback", source, clientMutationId: stored.clientMutationId,
+        noteId: stored.id, expectedPresent: source !== "create", expectedText: source === "create" ? null : stored.text,
+        expectedUpdatedAt: source === "create" ? null : stored.updatedAt, recoveryText: "Unclaimed paragraph" },
+      { sequence: 100, kind: "created", source: "create", clientMutationId: "later-note", noteId: 2,
+        expectedPresent: true, expectedText: "Later paragraph", expectedUpdatedAt: 2, recoveryText: null }],
+    };
+    const acknowledged: [number, number][] = [];
+    let currentSnapshot = snapshot;
+    let visible = false;
+    const composerRecoveries: { sequence: number; text: string }[] = [];
+    let recoveryMap = new Map<number, { sequence: number; text: string }>();
+    const environment = {
+      notesSnapshot: snapshot,
+      noteList: source === "create" ? [] : [stored],
+      useRef: (current: number) => ({ current }),
+      lastProcessedPresentationChangeRef: { current: 0 },
+      noteInputRef: { current: { restoreDraft: (value: { sequence: number; text: string }) => {
+        if (!visible) return false;
+        composerRecoveries.push(value); return true;
+      } } },
+      setNoteRecoveryDrafts: (update: (value: typeof recoveryMap) => typeof recoveryMap) => { recoveryMap = update(recoveryMap); },
+      notesSession: { getSnapshot: () => currentSnapshot, acknowledgeRecovery: (generation: number, sequence: number) => {
+        if (generation !== snapshot.generation || sequence !== 1) return false;
+        acknowledged.push([generation, sequence]);
+        currentSnapshot = { ...snapshot, presentationChanges: snapshot.presentationChanges.map((change) =>
+          change.sequence === sequence ? { ...change, recoveryText: null } : change) };
+        return true;
+      } },
+    };
+    environment.lastProcessedPresentationChangeRef = loadSourceCallableForAudit<() => { current: number }>(
+      `function initialize() { return ${cursorInitializer}; }`, "initialize", environment,
+    )();
+    assert.equal(environment.lastProcessedPresentationChangeRef.current, 100);
+    const deliver = loadSourceCallableForAudit<() => void>(`const deliver = ${recoveryEffect}`, "deliver", environment);
+    deliver();
+    assert.equal(environment.lastProcessedPresentationChangeRef.current, 100, "replayed recovery must not regress the ordinary event cursor");
+    assert.deepEqual(acknowledged, [], "a hidden composer or virtualized card must leave recovery unclaimed");
+    if (source === "create") {
+      assert.equal(composerRecoveries.length, 0);
+      visible = true; deliver();
+      assert.equal(composerRecoveries.length, 1, "a reopened route must restore an unclaimed create older than its initial event cursor");
+      assert.deepEqual(acknowledged, [[4, 1]], "composer recovery must ACK only after the actual owner accepts it");
+    } else {
+      assert.equal(recoveryMap.get(stored.id)?.text, "Unclaimed paragraph", "reopened card recovery must not be skipped by the ordinary event cursor");
+      const applied = loadSourceCallableForAudit<(id: number, sequence: number) => void>(routeSource, "handleRecoveryApplied", environment);
+      applied(stored.id, 2);
+      assert.equal(recoveryMap.size, 1, "a refused or mismatched recovery ACK must not clear a newer route draft");
+      applied(stored.id, 1);
+      assert.equal(recoveryMap.size, 0, "actual card application must clear the route recovery map to prevent later resurrection");
+      assert.deepEqual(acknowledged, [[4, 1]]);
+      deliver();
+      assert.equal(recoveryMap.size, 0, "a parent layout-effect with a stale snapshot must not resurrect recovery acknowledged by its child");
+    }
+  }
+}
+
 export function auditNoteEditorLifecycle(sources: LifecycleSources = {}): void {
   const { routeSource, createRoute, mount, frames, react, selectHooks } = createLifecycleHarness(sources);
+  auditNotesRecoveryDelivery(routeSource);
 
   {
     const text = "Opening paragraph\nClosing paragraph";
@@ -442,12 +522,78 @@ export function auditNoteEditorLifecycle(sources: LifecycleSources = {}): void {
     const route = createRoute([note(1)]);
     const card = mount(route, 1, { sequence: 1, text: "Recovered before edit" });
     assert.equal(card.input().props.defaultValue, "Recovered before edit", "recovery that opens a closed editor must seed its new native input");
+    assert.equal(route.editorSession.getActiveDraft()?.baseText, "Recovered before edit");
+    assert.equal(route.editorSession.hasUnsavedChanges(), true,
+      "a recovered closed editor must retain unsaved changes against its displayed source");
+    assert.equal(route.editorSession.getActiveDraft()?.sourceText, "Stored text");
+    assert.deepEqual(route.recoveries, [[1, 1]], "a closed recovery must be acknowledged only after the logical editor owns its text");
     card.type("Recovered before edit\nContinued");
     card.input().props.onContentSizeChange({ nativeEvent: { contentSize: { height: 60 } } });
     card.render();
     assert.equal(card.input().props.defaultValue, "Recovered before edit");
     card.save();
     assert.deepEqual(route.saves, [[1, "Recovered before edit\nContinued"]]);
+    card.unmount();
+  }
+  {
+    const route = createRoute([note(1), note(2)]);
+    const first = mount(route, 1); first.edit(); first.type("");
+    const second = mount(route, 2, { sequence: 7, text: "Rejected editor paragraph" });
+    assert.equal(second.isEditing(), false);
+    assert.deepEqual(route.recoveries, [], "a refused editor handoff must not acknowledge or consume recovery");
+    assert.equal(route.editorSession.getDraft("note:2"), null);
+    first.type("Accepted first paragraph");
+    second.edit();
+    assert.equal(route.editorSession.getActiveDraft()?.text, "Rejected editor paragraph",
+      "a later accepted Edit must retry recovery that a blank editor previously refused");
+    assert.deepEqual(route.recoveries, [[2, 7]], "recovery must be acknowledged after its later accepted editor entry");
+    first.unmount(); second.unmount();
+  }
+  for (const detached of [false, true]) {
+    for (const continued of ["Pending text", "Pending text\nContinued", "", "Stored text"]) {
+      const route = createRoute([note(1, "Pending text")]);
+      let card = mount(route, 1); card.edit();
+      assert.equal(route.editorSession.hasUnsavedChanges(), false);
+      card.type(continued);
+      if (detached) card.unmount();
+      route.setNotes([note(1)]);
+      if (detached) {
+        card = mount(route, 1, { sequence: 1, text: "Pending text" });
+      } else {
+        card.props.note = route.getNote(1);
+        card.props.recoveryDraft = { sequence: 1, text: "Pending text" };
+        card.render();
+      }
+      assert.equal(route.editorSession.getActiveDraft()?.text, continued,
+        "recovery must preserve edits derived from the failed optimistic text, including an explicit blank");
+      assert.equal(route.editorSession.getActiveDraft()?.baseText, "Pending text",
+        "recovery ancestry must remain separate from the current displayed source");
+      assert.equal(route.editorSession.getActiveDraft()?.sourceText, "Stored text",
+        "an active recovered editor must compare against the rolled-back displayed source");
+      assert.equal(route.editorSession.hasUnsavedChanges(), continued.trim() !== "Stored text",
+        "recovery must report only text different from the displayed source as unsaved");
+      card.unmount();
+      const restored = mount(route, 1, { sequence: 1, text: "Pending text" });
+      assert.equal(restored.input().props.defaultValue, continued);
+      assert.equal(route.editorSession.getActiveDraft()?.baseText, "Pending text");
+      assert.equal(route.editorSession.getActiveDraft()?.sourceText, "Stored text");
+      assert.equal(route.editorSession.hasUnsavedChanges(), continued.trim() !== "Stored text",
+        "virtualization must retain the recovered editor's dirty baseline and ancestry independently");
+      restored.type("Stored text");
+      assert.equal(route.editorSession.hasUnsavedChanges(), false,
+        "returning to the displayed source must clear dirty state without saving");
+      restored.unmount();
+    }
+  }
+  {
+    const route = createRoute([note(1)]);
+    const card = mount(route, 1); card.edit(); card.type("Published update");
+    assert.equal(route.editorSession.hasUnsavedChanges(), true);
+    route.setNotes([note(1, "Published update")]);
+    card.props.note = route.getNote(1); card.render();
+    assert.equal(route.editorSession.hasUnsavedChanges(), false,
+      "an editor matching a newer displayed source must not warn about unsaved changes");
+    assert.equal(route.editorSession.getActiveDraft()?.baseText, "Stored text");
     card.unmount();
   }
   {
@@ -672,7 +818,7 @@ export function auditNoteEditorLifecycle(sources: LifecycleSources = {}): void {
   };
   const initialOwner = editorRender();
   assert.equal(editorRender(), initialOwner, "ordinary renders must retain one semantic editor owner");
-  initialOwner.begin({ clientMutationId: "note:1", noteId: 1, text: "Previous draft", baseText: "Stored", recoverySequence: 0, viewportHeight: 20 });
+  initialOwner.begin({ clientMutationId: "note:1", noteId: 1, text: "Previous draft", baseText: "Stored", sourceText: "Stored", recoverySequence: 0, viewportHeight: 20 });
   const previousDatasetCard = mount(createRoute([note(1)], initialOwner), 1);
   assert.equal(previousDatasetCard.input().props.defaultValue, "Previous draft");
   previousDatasetCard.unmount();
@@ -899,9 +1045,41 @@ export function auditNoteEditorLifecycleMutations(): number {
       source: { noteCard: replaceOnce(noteCard, "      if (!editorOwner.live || !editingRef.current) return;\n      if (!inputRef.current?.isFocused())", "      if (!inputRef.current?.isFocused())") },
       expected: "a captured focus callback must not refocus a synchronously finished editor",
     },
+    {
+      source: { noteCard: replaceOnce(noteCard, "        baseText: initialDraft,\n        sourceText: note.text,", "        baseText: initialDraft,\n        sourceText: initialDraft,") },
+      expected: "a recovered closed editor must retain unsaved changes against its displayed source",
+    },
+    {
+      source: { noteCard: replaceOnce(replaceOnce(noteCard,
+        "      editorSession.update(note.clientMutationId, { sourceText: note.text });",
+        "      void note.text;"),
+      "      text: nextDraft,\n      sourceText: note.text,",
+      "      text: nextDraft,") },
+      expected: "an active recovered editor must compare against the rolled-back displayed source",
+    },
+    {
+      source: { noteCard: replaceOnce(noteCard, "      if (!enterEditing(nextDraft)) return;", "      enterEditing(nextDraft);") },
+      expected: "a refused editor handoff must not acknowledge or consume recovery",
+    },
+    {
+      source: { route: replaceOnce(route,
+        "if (!unclaimedRecovery && change.sequence <= lastProcessedPresentationChangeRef.current)",
+        "if (change.sequence <= lastProcessedPresentationChangeRef.current)") },
+      expected: "a reopened route must restore an unclaimed create older than its initial event cursor",
+    },
+    {
+      source: { route: replaceOnce(route,
+        "if (current.get(noteId)?.sequence !== sequence) return current;\n        const next = new Map(current);\n        next.delete(noteId);",
+        "if (current.get(noteId)?.sequence !== sequence) return current;\n        const next = new Map(current);") },
+      expected: "actual card application must clear the route recovery map to prevent later resurrection",
+    },
+    {
+      source: { route: replaceOnce(route, " && unclaimedSequences.has(change.sequence)", "") },
+      expected: "a parent layout-effect with a stale snapshot must not resurrect recovery acknowledged by its child",
+    },
   ];
   for (const trial of trials) {
-    assert.throws(() => auditNoteEditorLifecycle({ route, noteCard: trial.source.noteCard }), (error: unknown) =>
+    assert.throws(() => auditNoteEditorLifecycle({ route: trial.source.route ?? route, noteCard: trial.source.noteCard ?? noteCard }), (error: unknown) =>
       error instanceof assert.AssertionError && error.message.includes(trial.expected),
     `the lifecycle mutation must violate its intended behavior: ${trial.expected}`);
   }

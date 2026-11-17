@@ -25,10 +25,10 @@ const ALLOWED_SYNC_SQLITE = new Set([
 ]);
 const ZERO_SNAPSHOT_ID = "00000000-0000-0000-0000-000000000000";
 type MigrationJournal = {
-  entries: Array<{
+  entries: {
     idx: number;
     tag: string;
-  }>;
+  }[];
 };
 type MigrationSnapshot = {
   id: string;

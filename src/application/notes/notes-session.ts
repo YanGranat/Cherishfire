@@ -34,7 +34,7 @@ export interface NotesPresentationChange {
   readonly expectedPresent: boolean;
   readonly expectedText: string | null;
   readonly expectedUpdatedAt: number | null;
-  /** Exact user draft to restore when an optimistic save is rolled back. */
+  /** Failed user draft retained until a presentation owner claims it. */
   readonly recoveryText?: string | null;
 }
 
@@ -89,7 +89,28 @@ export interface NotesSession {
   create(text: string): NotesMutationSubmission;
   update(noteId: number, text: string): NotesMutationSubmission;
   delete(noteId: number): NotesMutationSubmission;
+  acknowledgeRecovery(generation: number, sequence: number): boolean;
   whenIdle(): Promise<void>;
+}
+
+function hasUnclaimedRecovery(change: NotesPresentationChange): boolean {
+  return change.kind === "rollback" && change.recoveryText != null;
+}
+
+function retainPresentationChanges(
+  changes: readonly NotesPresentationChange[],
+): readonly NotesPresentationChange[] {
+  const retained: NotesPresentationChange[] = [];
+  let ordinaryCount = 0;
+  for (let index = changes.length - 1; index >= 0; index -= 1) {
+    const change = changes[index];
+    if (hasUnclaimedRecovery(change)) retained.push(change);
+    else if (ordinaryCount < MAX_PRESENTATION_CHANGES) {
+      retained.push(change);
+      ordinaryCount += 1;
+    }
+  }
+  return retained.reverse();
 }
 
 interface NoteEntityState {
@@ -176,6 +197,26 @@ class NotesSessionImpl implements NotesSession {
     return this.pendingWriteCount > 0 || this.loadInFlight != null;
   }
 
+  hasUnclaimedRecovery(): boolean {
+    return this.snapshot.presentationChanges.some(hasUnclaimedRecovery);
+  }
+
+  acknowledgeRecovery(generation: number, sequence: number): boolean {
+    if (generation !== this.generation) return false;
+    const recovery = this.snapshot.presentationChanges.find(
+      (change) => change.sequence === sequence && hasUnclaimedRecovery(change),
+    );
+    if (!recovery) return false;
+    this.publish({
+      presentationChanges: retainPresentationChanges(
+        this.snapshot.presentationChanges.map((change) =>
+          change === recovery ? { ...change, recoveryText: null } : change,
+        ),
+      ),
+    });
+    return true;
+  }
+
   getResourceCounts() {
     return {
       listenerCount: this.listeners.size,
@@ -207,6 +248,7 @@ class NotesSessionImpl implements NotesSession {
     // replace the identity of an editor that is still mounted.
     if (change?.kind === "reason-notes-removed") {
       const dates = new Set(change.dates);
+      const removedClients = new Set<string>();
       const wasRemoved = (note: Note) =>
         dates.has(note.date) &&
         (note.isFailureReason ||
@@ -214,12 +256,20 @@ class NotesSessionImpl implements NotesSession {
           note.reasonType === "skipped");
       for (const [id, entity] of this.entitiesByUiId) {
         if (entity.confirmed != null && wasRemoved(entity.confirmed)) {
+          removedClients.add(entity.clientMutationId);
           this.entitiesByUiId.delete(id);
         }
       }
       this.publish({
         status: "idle",
         notes: this.snapshot.notes.filter((note) => !wasRemoved(note)),
+        presentationChanges: retainPresentationChanges(
+          this.snapshot.presentationChanges.map((item) =>
+            removedClients.has(item.clientMutationId)
+              ? { ...item, recoveryText: null }
+              : item,
+          ),
+        ),
       });
       return;
     }
@@ -552,6 +602,7 @@ class NotesSessionImpl implements NotesSession {
             status: loaded.habitExists ? "ready" : "missing",
             habitExists: loaded.habitExists,
             notes,
+            ...(!loaded.habitExists ? { presentationChanges: [] } : {}),
           });
           return;
         }
@@ -781,10 +832,17 @@ class NotesSessionImpl implements NotesSession {
       ...change,
       sequence: this.changeSequence,
     };
-    const presentationChanges = [
-      ...this.snapshot.presentationChanges,
+    const previousChanges = change.kind === "updated" || change.kind === "deleted"
+      ? this.snapshot.presentationChanges.map((item) =>
+        item.clientMutationId === change.clientMutationId && hasUnclaimedRecovery(item)
+          ? { ...item, recoveryText: null }
+          : item,
+      )
+      : this.snapshot.presentationChanges;
+    const presentationChanges = retainPresentationChanges([
+      ...previousChanges,
       presentationChange,
-    ].slice(-MAX_PRESENTATION_CHANGES);
+    ]);
     this.publish({ notes, mutationError, presentationChanges }, revision);
   }
 
@@ -863,7 +921,7 @@ export function createNotesSessionRegistry(
       // `get` must never return a session that its own LRU cleanup already
       // removed before React can subscribe or a command can register a write.
       if (session === protectedSession) continue;
-      if (session.hasSubscribers() || session.hasPendingWork()) continue;
+      if (session.hasSubscribers() || session.hasPendingWork() || session.hasUnclaimedRecovery()) continue;
       sessions.delete(habitId);
     }
   };

@@ -38,7 +38,7 @@
     "everyNDays_other": "Cada {{count}} días",
     "dayOfMonth_one": "{{count}}",
     "dayOfMonth_other": "{{count}}",
-    "fromCompletion": "Desde completar",
+    "fromCompletion": "Tras completarlo",
     "decreaseInterval": "Reducir el intervalo",
     "increaseInterval": "Aumentar el intervalo",
     "intervalValue": "Intervalo en días"
@@ -58,7 +58,7 @@
     "wed": "MI",
     "thu": "JU",
     "fri": "VI",
-    "sat": "SA",
+    "sat": "SÁ",
     "sun": "DO"
   },
   "detail": {
@@ -133,6 +133,9 @@
     "retry": "Reintentar"
   },
   "notes": {
+    "discardTitle": "¿Descartar los cambios?",
+    "discardMessage": "El texto sin guardar se perderá.",
+    "discard": "Descartar",
     "title": "Notas",
     "placeholder": "Nueva nota...",
     "emptyTitle": "Aún no hay notas",
@@ -254,8 +257,9 @@
     "success": "Datos importados",
     "errorTitle": "Error de importación",
     "errorMessage": "El archivo está dañado o tiene un formato inválido.",
+    "actionErrorMessage": "No se pudo completar la importación. Inténtalo de nuevo.",
     "previewTitle": "¿Reemplazar los datos actuales?",
-    "previewMessage": "El archivo contiene {{habits}} hábitos, {{archived}} archivados, {{records}} registros y {{notes}} notas. Los datos actuales se reemplazarán.",
+    "previewMessage": "Total de hábitos: {{habits}} (en el archivo: {{archived}}). Registros: {{records}}. Notas: {{notes}}. Los datos actuales se reemplazarán.",
     "replaceData": "Reemplazar",
     "importing": "Importando..."
   },
@@ -288,8 +292,11 @@
     "notificationBody": "Es hora de realizar tu hábito: {{name}}",
     "timeLabel": "Hora del recordatorio",
     "addTime": "Añadir hora de recordatorio",
-    "removeTime": "Eliminar el recordatorio de las {{time}}",
-    "duplicateTime": "Usa una hora diferente para cada recordatorio"
+    "removeTime": "Eliminar el recordatorio: {{time}}",
+    "duplicateTime": "Usa una hora diferente para cada recordatorio",
+    "permissionBlocked": "Las notificaciones están bloqueadas en los ajustes del sistema.",
+    "permissionUnavailable": "Los ajustes de notificaciones no están disponibles. Inténtalo de nuevo.",
+    "openSystemSettings": "Abrir ajustes del sistema"
   },
   "accessibility": {
     "openHabit": "Abrir hábito",

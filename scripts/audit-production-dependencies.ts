@@ -9,7 +9,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-audit";
 
-type AuditVia = string | { source?: number };
+type AuditVia = string | { source?: number; severity?: string };
 type AuditReport = {
   auditReportVersion?: number;
   vulnerabilities?: Record<string, { severity?: string; via?: AuditVia[] }>;
@@ -20,39 +20,94 @@ type AuditReport = {
 
 // Native query decoding and outbound query serialization have separate owners.
 // Metro asset metadata uses both filename and Buffer image-size overloads.
-const REVIEWED_RESIDUAL_PACKAGES = [
-  "@expo/cli",
-  "@expo/config",
-  "@expo/config-plugins",
-  "@expo/fingerprint",
-  "@expo/metro-config",
-  "@expo/prebuild-config",
-  "decode-uri-component",
-  "deepmerge",
-  "expo",
-  "expo-asset",
-  "expo-constants",
-  "expo-linking",
-  "expo-notifications",
-  "expo-router",
-  "glob",
-  "image-size",
-  "minimatch",
-  "query-string",
-  "uuid",
-  "xcode",
-] as const;
+const SEVERITIES = ["info", "low", "moderate", "high", "critical"] as const;
+type Severity = (typeof SEVERITIES)[number];
+interface ReviewedResidual {
+  severity: Severity;
+  via: readonly (string | number)[];
+}
+// Reviewed risk is a ceiling; withdrawn findings and lower severities are valid.
+const REVIEWED_RESIDUAL_PACKAGES: Readonly<Record<string, ReviewedResidual>> = {
+  "@expo/cli": { severity: "moderate", via: ["@expo/config", "@expo/config-plugins", "@expo/metro-config", "@expo/prebuild-config", "glob", "minimatch"] },
+  "@expo/config": { severity: "moderate", via: ["@expo/config-plugins", "deepmerge", "glob"] },
+  "@expo/config-plugins": { severity: "moderate", via: ["glob", "xcode"] },
+  "@expo/fingerprint": { severity: "moderate", via: ["glob", "minimatch"] },
+  "@expo/metro-config": { severity: "moderate", via: ["@expo/config", "glob"] },
+  "@expo/prebuild-config": { severity: "moderate", via: ["@expo/config", "@expo/config-plugins"] },
+  "decode-uri-component": { severity: "high", via: [1_147_955, 1_243_857] },
+  deepmerge: { severity: "low", via: [1_243_505] },
+  expo: { severity: "moderate", via: ["@expo/cli", "@expo/config", "@expo/config-plugins", "@expo/fingerprint", "@expo/metro-config", "expo-asset", "expo-constants"] },
+  "expo-asset": { severity: "moderate", via: ["expo-constants"] },
+  "expo-constants": { severity: "moderate", via: ["@expo/config"] },
+  "expo-linking": { severity: "moderate", via: ["expo-constants"] },
+  "expo-notifications": { severity: "moderate", via: ["expo-constants"] },
+  "expo-router": { severity: "high", via: ["expo-constants", "expo-linking", "query-string"] },
+  glob: { severity: "moderate", via: [1_244_013, "minimatch"] },
+  "image-size": { severity: "high", via: [1_239_765, 1_239_766] },
+  minimatch: { severity: "moderate", via: [1_244_623] },
+  "query-string": { severity: "high", via: ["decode-uri-component"] },
+  uuid: { severity: "moderate", via: [1_119_441] },
+  xcode: { severity: "moderate", via: ["uuid"] },
+};
+const REVIEWED_ADVISORY_SEVERITIES: Readonly<Record<number, Severity>> = {
+  1_119_441: "moderate",
+  1_147_955: "moderate",
+  1_239_765: "high",
+  1_239_766: "high",
+  1_243_505: "low",
+  1_243_857: "high",
+  1_244_013: "moderate",
+  1_244_623: "moderate",
+};
 
-const REVIEWED_ADVISORY_IDS = [
-  1_119_441,
-  1_147_955,
-  1_239_765,
-  1_239_766,
-  1_243_505,
-  1_243_857,
-  1_244_013,
-  1_244_623,
-] as const;
+function assertReviewedDependencyReport(report: AuditReport): void {
+  assert.equal(report.auditReportVersion, 2, "npm audit must return a versioned vulnerability report");
+  assert.ok(report.vulnerabilities && !Array.isArray(report.vulnerabilities) && report.metadata?.vulnerabilities, "npm audit report must include vulnerabilities and metadata");
+  const observedCounts: Record<string, number> = { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 };
+  for (const [name, entry] of Object.entries(report.vulnerabilities)) {
+    assert.ok(Object.hasOwn(REVIEWED_RESIDUAL_PACKAGES, name), `unreviewed vulnerable package: ${name}`);
+    const reviewed = REVIEWED_RESIDUAL_PACKAGES[name];
+    const severity = SEVERITIES.indexOf(entry.severity as Severity);
+    assert.ok(severity >= 0 && severity <= SEVERITIES.indexOf(reviewed.severity), `vulnerability severity increased for ${name}`);
+    observedCounts[entry.severity!] += 1;
+    observedCounts.total += 1;
+    assert.ok(Array.isArray(entry.via) && entry.via.length > 0, `npm audit must identify advisory links for ${name}`);
+    for (const via of entry.via) {
+      if (typeof via === "string") {
+        assert.ok(reviewed.via.includes(via) && Object.hasOwn(report.vulnerabilities, via), `unreviewed vulnerable dependency link: ${name} -> ${via}`);
+      } else {
+        assert.ok(via && typeof via.source === "number" && reviewed.via.includes(via.source), `unreviewed advisory for ${name}`);
+        const advisoryLimit = REVIEWED_ADVISORY_SEVERITIES[via.source];
+        const advisorySeverity = SEVERITIES.indexOf(via.severity as Severity);
+        assert.ok(advisoryLimit && advisorySeverity >= 0 && advisorySeverity <= SEVERITIES.indexOf(advisoryLimit), `advisory severity increased for ${name}:${via.source}`);
+      }
+    }
+  }
+  const reportedCounts = report.metadata.vulnerabilities;
+  for (const [severity, count] of Object.entries(observedCounts)) {
+    assert.equal(reportedCounts[severity], count, `npm audit metadata must match vulnerability entries for ${severity}`);
+  }
+}
+
+function auditDependencyReportPolicy(): void {
+  const reportFor = (vulnerabilities: NonNullable<AuditReport["vulnerabilities"]>, counts: Record<string, number>): AuditReport => ({
+    auditReportVersion: 2, vulnerabilities,
+    metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, ...counts, total: Object.keys(vulnerabilities).length } },
+  });
+  const original = reportFor({ "decode-uri-component": { severity: "high", via: [{ source: 1_243_857, severity: "high" }, { source: 1_147_955, severity: "moderate" }] } }, { high: 1 });
+  assertReviewedDependencyReport(original);
+  assertReviewedDependencyReport(reportFor({}, {}));
+  assertReviewedDependencyReport(reportFor({ "decode-uri-component": { severity: "moderate", via: [{ source: 1_243_857, severity: "moderate" }] } }, { moderate: 1 }));
+  assert.throws(() => assertReviewedDependencyReport(reportFor({ "unknown-package": { severity: "low", via: [{ source: 1_243_505, severity: "low" }] } }, { low: 1 })), /unreviewed vulnerable package/);
+  assert.throws(() => assertReviewedDependencyReport(reportFor({ "decode-uri-component": { severity: "high", via: [{ source: 9_999_999, severity: "high" }] } }, { high: 1 })), /unreviewed advisory/);
+  assert.throws(() => assertReviewedDependencyReport(reportFor({ uuid: { severity: "high", via: [{ source: 1_119_441, severity: "moderate" }] } }, { high: 1 })), /vulnerability severity increased/);
+  assert.throws(() => assertReviewedDependencyReport(reportFor({ "decode-uri-component": { severity: "high", via: [{ source: 1_147_955, severity: "high" }] } }, { high: 1 })), /advisory severity increased/);
+  assert.throws(() => assertReviewedDependencyReport(reportFor({ uuid: { severity: "moderate", via: [{ source: 1_243_857, severity: "high" }] } }, { moderate: 1 })), /unreviewed advisory/);
+  assert.throws(() => assertReviewedDependencyReport(reportFor({ "expo-router": { severity: "moderate", via: ["uuid"] }, uuid: { severity: "moderate", via: [{ source: 1_119_441, severity: "moderate" }] } }, { moderate: 2 })), /unreviewed vulnerable dependency link/);
+  const wrongCounts = structuredClone(original);
+  wrongCounts.metadata!.vulnerabilities!.high = 0;
+  assert.throws(() => assertReviewedDependencyReport(wrongCounts), /metadata must match/);
+}
 
 const requireDependency = createRequire(import.meta.url);
 const projectRoot = resolve(import.meta.dirname, "..");
@@ -374,6 +429,7 @@ async function auditInstalledInterop(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  auditDependencyReportPolicy();
   await auditInstalledInterop();
 
   const npmExecPath = process.env.npm_execpath;
@@ -401,50 +457,7 @@ async function main(): Promise<void> {
   }
 
   const report = JSON.parse(result.stdout) as AuditReport;
-  assert.equal(
-    report.auditReportVersion,
-    2,
-    `npm audit did not return a vulnerability report: ${result.stderr.trim() || result.stdout.trim()}`,
-  );
-  assert.ok(
-    report.metadata?.vulnerabilities,
-    "npm audit report is missing vulnerability metadata",
-  );
-  const vulnerabilities = report.vulnerabilities ?? {};
-  const packageNames = Object.keys(vulnerabilities).sort();
-  assert.deepEqual(
-    packageNames,
-    [...REVIEWED_RESIDUAL_PACKAGES].sort(),
-    "production dependency advisories changed; review the new npm audit report",
-  );
-
-  const advisoryIds = new Set<number>();
-  for (const vulnerability of Object.values(vulnerabilities)) {
-    for (const via of vulnerability.via ?? []) {
-      if (typeof via !== "string" && typeof via.source === "number") {
-        advisoryIds.add(via.source);
-      }
-    }
-  }
-  assert.deepEqual(
-    [...advisoryIds].sort((left, right) => left - right),
-    [...REVIEWED_ADVISORY_IDS].sort((left, right) => left - right),
-    "the accepted Expo SDK 54 advisory identities changed",
-  );
-
-  const counts = report.metadata?.vulnerabilities ?? {};
-  assert.deepEqual(
-    {
-      info: counts.info ?? 0,
-      low: counts.low ?? 0,
-      moderate: counts.moderate ?? 0,
-      high: counts.high ?? 0,
-      critical: counts.critical ?? 0,
-      total: counts.total ?? 0,
-    },
-    { info: 0, low: 1, moderate: 15, high: 4, critical: 0, total: 20 },
-    "the accepted Expo SDK 54 vulnerability severity baseline changed",
-  );
+  assertReviewedDependencyReport(report);
 
   console.log(
     "Production dependency audit passed.",

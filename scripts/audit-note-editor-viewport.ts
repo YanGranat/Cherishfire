@@ -62,8 +62,8 @@ export function assertNoteEditorViewportLayout(source: string): void {
   const viewportStyle = styleFields(viewport);
   assert.deepEqual([...viewportStyle.keys()].sort(), ["flex", "overflow", "paddingBottom"]);
   assert.equal(viewportStyle.get("flex"), "1");
-  assert.equal(viewportStyle.get("paddingBottom"), "editorKeyboardLift",
-    "the measured editor lift must belong to the list viewport");
+  assert.equal(viewportStyle.get("paddingBottom"), "editorBottomPadding",
+    "the measured editor lift and uncovered safe area must belong to the list viewport");
   assert.equal(viewportStyle.get("overflow"), '"hidden"', "the viewport must clip the extended editor painting once");
   let parent: ts.Node | undefined = list.parent;
   while (parent && parent !== viewport.parent) parent = parent.parent;
@@ -76,6 +76,8 @@ export function assertNoteEditorViewportLayout(source: string): void {
   assert.equal(painting.length, 1, "the route must define one editor painting mode");
   const lift = initializers.get("editorKeyboardLift") ?? [];
   assert.equal(lift.length, 1, "the route must define one manual editor lift");
+  const bottomPadding = initializers.get("editorBottomPadding") ?? [];
+  assert.equal(bottomPadding.length, 1, "the route must define one editor bottom padding");
   for (const platform of ["android", "ios", "web"]) {
     for (const editing of [false, true]) {
       const enabled = evaluate(painting[0], { Platform: { OS: platform }, editingNoteIds: new Set(editing ? [1] : []) });
@@ -84,6 +86,21 @@ export function assertNoteEditorViewportLayout(source: string): void {
       assert.equal(evaluate(lift[0], {
         Platform: { OS: platform }, editingNoteIds: new Set(editing ? [1] : []), viewportKeyboardLift: 96,
       }), enabled ? 96 : 0, "manual editor padding must not duplicate iOS padding or affect the composer mode");
+      for (const releasePending of [false, true]) {
+        for (const keyboardVisible of [false, true]) {
+          for (const bottomInset of [0, 16, 24, 48]) {
+            const hideComposer = editing || releasePending;
+            const manualLift: number = enabled && keyboardVisible ? 96 : 0;
+            const actual = evaluate(bottomPadding[0], {
+              editorKeyboardLift: manualLift, hideComposer, keyboardVisible,
+              insets: { bottom: bottomInset },
+            });
+            const expected: number = manualLift + (hideComposer && !keyboardVisible ? bottomInset : 0);
+            assert.equal(actual, expected,
+              "hidden composer must transfer its safe area to the list only while the keyboard is hidden");
+          }
+        }
+      }
       const style = evaluate(attribute(list, "style"), { extendEditorPainting: enabled });
       assert.equal(style?.overflow, enabled ? "visible" : undefined);
       assert.equal(evaluate(attribute(list, "removeClippedSubviews"), { extendEditorPainting: enabled }), enabled ? false : undefined,
@@ -152,6 +169,10 @@ export function auditNoteEditorViewportMutations(): number {
   };
   auditNoteEditorViewport({ wrapper, route });
   const trials: { wrapper?: string; route?: string; expected: string }[] = [
+    { route: replace(route, "hideComposer && !keyboardVisible ? insets.bottom : 0", "false ? insets.bottom : 0"), expected: "transfer its safe area" },
+    { route: replace(route, "hideComposer && !keyboardVisible ? insets.bottom : 0", "hideComposer ? insets.bottom : 0"), expected: "transfer its safe area" },
+    { route: replace(route, "hideComposer && !keyboardVisible ? insets.bottom : 0", "!keyboardVisible ? insets.bottom : 0"), expected: "transfer its safe area" },
+    { route: replace(route, "hideComposer && !keyboardVisible ? insets.bottom : 0", "hideComposer && !keyboardVisible ? 12 : 0"), expected: "transfer its safe area" },
     { wrapper: replace(wrapper, 'Platform.OS === "android"', "true"), expected: "non-Android platforms must not load the viewport module" },
     { wrapper: replace(wrapper, "nativeMetrics?.supportsViewport === true", "nativeMetrics !== null"), expected: "only with explicit capability" },
     { route: replace(route, "      if (hasNativeNoteEditorViewport) return;", ""), expected: "a native viewport must not start the JS keyboard geometry owner" },

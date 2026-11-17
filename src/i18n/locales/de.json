@@ -32,7 +32,7 @@
     "tabDays": "TAGE",
     "tabMonthly": "MONATLICH",
     "tabInterval": "INTERVALL",
-    "everyNDays_one": "Alle {{count}} Tag",
+    "everyNDays_one": "Jeden Tag",
     "everyNDays_few": "Alle {{count}} Tage",
     "everyNDays_many": "Alle {{count}} Tage",
     "everyNDays_other": "Alle {{count}} Tage",
@@ -96,7 +96,7 @@
   "contextMenu": {
     "minimum": "Minimum",
     "maximum": "Maximum",
-    "failure": "Fehler",
+    "failure": "Fehlschlag",
     "skip": "Überspringen",
     "archive": "Archivieren"
   },
@@ -105,11 +105,11 @@
     "minimum": "Minimum",
     "maximum": "Maximum",
     "skip": "Überspringen",
-    "failure": "Fehler"
+    "failure": "Fehlschlag"
   },
   "failureDialog": {
-    "title": "Grund für Fehler",
-    "skipTitle": "Grund für Überspringen",
+    "title": "Grund für den Fehlschlag",
+    "skipTitle": "Grund fürs Überspringen",
     "placeholder": "Grund eingeben (optional)",
     "skip": "Überspringen",
     "save": "Speichern"
@@ -133,6 +133,9 @@
     "retry": "Erneut versuchen"
   },
   "notes": {
+    "discardTitle": "Änderungen verwerfen?",
+    "discardMessage": "Dein ungespeicherter Text geht verloren.",
+    "discard": "Verwerfen",
     "title": "Notizen",
     "placeholder": "Neue Notiz...",
     "emptyTitle": "Noch keine Notizen",
@@ -173,7 +176,7 @@
     "theme": "Design",
     "colorScheme": "Farbschema",
     "language": "Sprache",
-    "askFailureReason": "Nach Fehlergrund fragen",
+    "askFailureReason": "Bei Fehlschlag nach dem Grund fragen",
     "askSkipReason": "Nach Grund beim Überspringen fragen",
     "sound": "Ton",
     "reminders": "Erinnerungen",
@@ -219,14 +222,14 @@
     "saturationValuePicker": "Farbsättigung und Helligkeit",
     "huePicker": "Farbton",
     "hexLabel": "HEX-Farbe",
-    "invalidHex": "Geben Sie eine Farbe im Format #RRGGBB ein",
+    "invalidHex": "Gib eine Farbe im Format #RRGGBB ein",
     "duplicateColor": "Diese Farbe ist bereits in der Liste",
     "add": "Hinzufügen",
     "save": "Speichern",
     "cancel": "Abbrechen",
     "deleteColor": "Farbe löschen",
     "lastColorCannotDelete": "Die letzte Farbe kann nicht gelöscht werden",
-    "editHint": "Tippen Sie auf das Farbsymbol oder halten Sie die Zeile zum Bearbeiten gedrückt"
+    "editHint": "Tippe auf das Farbsymbol oder halte die Zeile zum Bearbeiten gedrückt"
   },
   "languageScreen": {
     "title": "Sprache"
@@ -239,7 +242,7 @@
   },
   "export": {
     "title": "Daten exportieren",
-    "message": "Alle Gewohnheiten, Notizen und Verlauf werden in einer JSON-Datei gespeichert.",
+    "message": "Alle Gewohnheiten und Notizen sowie der Verlauf werden in einer JSON-Datei gespeichert.",
     "cancel": "Abbrechen",
     "export": "Exportieren",
     "success": "Daten exportiert",
@@ -254,8 +257,9 @@
     "success": "Daten importiert",
     "errorTitle": "Importfehler",
     "errorMessage": "Die Datei ist beschädigt oder hat ein ungültiges Format.",
+    "actionErrorMessage": "Import konnte nicht abgeschlossen werden. Versuche es erneut.",
     "previewTitle": "Aktuelle Daten ersetzen?",
-    "previewMessage": "Die Datei enthält {{habits}} Gewohnheiten, {{archived}} archivierte, {{records}} Einträge und {{notes}} Notizen. Die aktuellen Daten werden ersetzt.",
+    "previewMessage": "Gewohnheiten: {{habits}} (davon archiviert: {{archived}}). Markierungen: {{records}}. Notizen: {{notes}}. Die aktuellen Daten werden ersetzt.",
     "replaceData": "Ersetzen",
     "importing": "Wird importiert..."
   },
@@ -289,7 +293,10 @@
     "timeLabel": "Erinnerungszeit",
     "addTime": "Erinnerungszeit hinzufügen",
     "removeTime": "Erinnerung um {{time}} entfernen",
-    "duplicateTime": "Verwende für jede Erinnerung eine andere Uhrzeit"
+    "duplicateTime": "Verwende für jede Erinnerung eine andere Uhrzeit",
+    "permissionBlocked": "Benachrichtigungen sind in den Systemeinstellungen blockiert.",
+    "permissionUnavailable": "Die Benachrichtigungseinstellungen sind nicht verfügbar. Versuche es erneut.",
+    "openSystemSettings": "Systemeinstellungen öffnen"
   },
   "accessibility": {
     "openHabit": "Gewohnheit öffnen",

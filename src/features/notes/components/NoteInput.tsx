@@ -23,9 +23,10 @@ interface NoteInputProps {
   hidden?: boolean;
   keyboardVisible: boolean;
   extraKeyboardLift: number;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 export interface NoteInputHandle {
-  restoreDraft(recovery: { sequence: number; text: string }): void;
+  restoreDraft(recovery: { sequence: number; text: string }): boolean;
 }
 // Bottom composer with bounded growth and an empty-draft disabled send action.
 export const NoteInput = forwardRef<NoteInputHandle, NoteInputProps>(
@@ -35,6 +36,7 @@ export const NoteInput = forwardRef<NoteInputHandle, NoteInputProps>(
       hidden = false,
       keyboardVisible,
       extraKeyboardLift,
+      onDirtyChange,
     }: NoteInputProps,
     forwardedRef,
   ) {
@@ -67,6 +69,13 @@ export const NoteInput = forwardRef<NoteInputHandle, NoteInputProps>(
     const lastEditWasDeleteRef = useRef(false);
     const inputRef = useRef<TextInput>(null);
     const appliedRecoverySequenceRef = useRef(0);
+    const dirtyRef = useRef(false);
+    const publishDirty = (value: string) => {
+      const next = value.trim().length > 0;
+      if (next === dirtyRef.current) return;
+      dirtyRef.current = next;
+      onDirtyChange?.(next);
+    };
     const isSingleLineInput = inputHeight <= baseInputHeight + 1;
     const applyInputHeight = (value: number) => {
       const nextHeight = Math.round(
@@ -88,7 +97,8 @@ export const NoteInput = forwardRef<NoteInputHandle, NoteInputProps>(
     };
     useImperativeHandle(forwardedRef, () => ({
       restoreDraft(recovery) {
-        if (recovery.sequence <= appliedRecoverySequenceRef.current) return;
+        if (hidden) return false;
+        if (recovery.sequence <= appliedRecoverySequenceRef.current) return true;
         appliedRecoverySequenceRef.current = recovery.sequence;
         const nextText = mergeRecoveredDraft(
           recovery.text,
@@ -101,8 +111,10 @@ export const NoteInput = forwardRef<NoteInputHandle, NoteInputProps>(
         prevTextLengthRef.current = nextText.length;
         lastEditWasDeleteRef.current = false;
         setText(nextText);
+        publishDirty(nextText);
         applyInputHeight(getExplicitLinesHeight(nextText));
         inputRef.current?.focus();
+        return true;
       },
     }));
     const handleSend = () => {
@@ -114,6 +126,7 @@ export const NoteInput = forwardRef<NoteInputHandle, NoteInputProps>(
         draftBaseTextRef.current = "";
         measuredInputHeightRef.current = baseInputHeight;
         setText("");
+        publishDirty("");
         setInputHeight(baseInputHeight);
         prevTextLengthRef.current = 0;
         lastEditWasDeleteRef.current = false;
@@ -160,6 +173,7 @@ export const NoteInput = forwardRef<NoteInputHandle, NoteInputProps>(
               lastEditWasDeleteRef.current = value.length < prevLength;
               prevTextLengthRef.current = value.length;
               setText(value);
+              publishDirty(value);
               if (value.length === 0) {
                 applyInputHeight(baseInputHeight);
                 return;
@@ -209,6 +223,7 @@ export const NoteInput = forwardRef<NoteInputHandle, NoteInputProps>(
             accessibilityRole="button"
             accessibilityLabel={t("notes.send")}
             accessibilityState={{ disabled: !canSend }}
+            hitSlop={3}
             className="items-center justify-center"
             style={{
               width: sendButtonSize,

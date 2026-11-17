@@ -338,7 +338,7 @@ assert.match(
 );
 assert.match(
   archiveScreen,
-  /const isLoading = !allHabitsLoaded && loadError == null;/,
+  /const isLoading = !allHabitsLoaded && !loadError;/,
   "a terminal archive load error must replace the spinner and expose Retry",
 );
 assert.match(

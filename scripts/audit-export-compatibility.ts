@@ -9,7 +9,13 @@ import {
   normalizeImportData,
   previewImportData,
   validateImportData,
+  verifyRestoredImportRows,
 } from "../src/application/data-transfer/data-transfer-codec";
+import { createHabitPersistenceApplication } from "../src/application/habits/habit-persistence";
+import { isDateInArchiveHistory, normalizeArchiveHistory } from "../src/domain/habits/archive-periods";
+import { loadSqliteRepositoriesForAudit } from "./fixtures/load-sqlite-repositories-for-audit";
+import type { DataTransferRows } from "../src/application/data-transfer/data-transfer-model";
+import type { ArchivePeriod } from "../src/types/habit";
 import {
   MAX_DATA_TRANSFER_IMPORT_BYTES,
   DataTransferImportSizeError,
@@ -308,7 +314,7 @@ assert.throws(
 );
 
 function buildFixtureSettingsSignature(
-  rows: Array<{ key: string; value: string }>,
+  rows: { key: string; value: string }[],
 ): string {
   const input = rows
     .map((row) => JSON.stringify({ key: row.key, value: row.value }))
@@ -612,7 +618,159 @@ async function auditBoundedImportRead(): Promise<void> {
   );
 }
 
-void withAuditDeadline(auditBoundedImportRead, "Export compatibility audit")
+function canonicalFixtureJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) =>
+    item != null && typeof item === "object" && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ))
+      : item,
+  );
+}
+
+function signFixtureHabits(value: Record<string, any>): void {
+  const entries = value.habits.map((habit: Record<string, any>) =>
+    canonicalFixtureJson({
+      ...habit,
+      archivedAt: habit.archivedAt == null ? null : Date.parse(habit.archivedAt),
+      archiveHistory: normalizeArchiveHistory(habit.archiveHistory),
+      createdAt: Date.parse(habit.createdAt),
+      updatedAt: Date.parse(habit.updatedAt),
+    }),
+  ).sort();
+  let hash = 0x811c9dc5;
+  const input = entries.join("\n");
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  value.integrity.habits_signature = (hash >>> 0).toString(16).padStart(8, "0");
+  value.integrity.archived_habits_count = value.habits.filter(
+    (habit: Record<string, any>) => habit.isArchived,
+  ).length;
+}
+
+function assertInvalidArchiveHistory(
+  json: string,
+  mutate: (habit: Record<string, any>) => void,
+  expected: RegExp,
+): void {
+  const value = JSON.parse(json) as Record<string, any>;
+  mutate(value.habits[0]);
+  signFixtureHabits(value);
+  const invalid = validateImportData(JSON.stringify(value));
+  assert.equal(invalid.valid, false, "invalid archive chronology must not become importable with a valid signature");
+  assert.match(invalid.error ?? "", expected);
+  assert.doesNotMatch(invalid.error ?? "", /integrity/i);
+}
+
+async function auditArchiveTimezoneRoundTrip(): Promise<void> {
+  const previousTimezone = process.env.TZ;
+  const fixture = loadSqliteRepositoriesForAudit();
+  const application = createHabitPersistenceApplication(fixture.habits);
+  const dateKeys = ["2032-04-09", "2032-04-10", "2032-04-11", "2032-04-12"];
+  const membership = (history: ArchivePeriod[]) =>
+    dateKeys.map((date) => isDateInArchiveHistory(date, history));
+  let closedJson = "";
+  try {
+    const startDate = "2032-04-01";
+    const repeatSchedule = { type: "daily" } as const;
+    const createdAt = Date.parse(`${startDate}T00:00:00.000Z`);
+    const habit = await application.createHabit({
+      habit: {
+        name: "Practice", description: null, descriptionVisible: true,
+        repeatSchedule, scheduleHistory: [{ effectiveFrom: startDate, startDate, repeatSchedule }],
+        startDate, reminderEnabled: false, reminderTime: null, displayOrder: 0,
+        isArchived: false, archivedAt: null, archiveHistory: [], createdAt, updatedAt: createdAt,
+      },
+      resolveDisplayOrderFromStorage: true,
+    });
+    process.env.TZ = "Pacific/Kiritimati";
+    await application.archiveHabit(habit.id, Date.parse("2032-04-10T00:00:00.000Z"));
+    await application.restoreHabits([habit.id], Date.parse("2032-04-11T00:00:00.000Z"));
+    process.env.TZ = "Pacific/Honolulu";
+    await application.archiveHabit(habit.id, Date.parse("2032-04-11T05:00:00.000Z"));
+    const assertRoundTrip = async (expectedMembership: boolean[]): Promise<string> => {
+      const snapshot: DataTransferRows = await fixture.transfers.readConsistentSnapshot();
+      const expectedHistory = snapshot.habits[0].archiveHistory;
+      assert.equal(expectedHistory[0].restoredDate, "2032-04-11");
+      assert.equal(expectedHistory[1].archivedDate, "2032-04-10");
+      assert.ok(expectedHistory[1].archivedAt > expectedHistory[0].restoredAt!);
+      assert.deepEqual(membership(expectedHistory), expectedMembership);
+      let json = "";
+      assert.doesNotThrow(() => {
+        json = buildExportJsonFromRows({ ...snapshot, exportedAt: "2032-04-13T00:00:00.000Z" });
+      }, "chronological archive instants with overlapping local dates must remain exportable");
+      const signed = JSON.parse(json) as Record<string, any>;
+      const expectedSignature = signed.integrity.habits_signature;
+      signFixtureHabits(signed);
+      assert.equal(signed.integrity.habits_signature, expectedSignature, "fixture signatures must match ordinary exports before adversarial edits");
+      const imported = normalizeImportData(json);
+      assert.deepEqual(imported.habits[0].archiveHistory, expectedHistory, "export/import must preserve captured local archive boundaries");
+      process.env.TZ = "Europe/Berlin";
+      await fixture.transfers.replaceAndVerify(imported, (rows) => verifyRestoredImportRows(imported, rows));
+      const restored = await fixture.transfers.readConsistentSnapshot();
+      assert.deepEqual(restored.habits[0].archiveHistory, expectedHistory);
+      assert.deepEqual(membership(restored.habits[0].archiveHistory), expectedMembership, "timezone changes must preserve union membership after SQLite restoration");
+      return json;
+    };
+    await assertRoundTrip([false, true, true, true]);
+    process.env.TZ = "Pacific/Honolulu";
+    await application.restoreHabits([habit.id], Date.parse("2032-04-12T05:00:00.000Z"));
+    closedJson = await assertRoundTrip([false, true, false, false]);
+  } finally {
+    fixture.database.close();
+    if (previousTimezone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimezone;
+  }
+
+  assertInvalidArchiveHistory(closedJson, (habit) => {
+    habit.archiveHistory[1].archivedAt = habit.archiveHistory[0].restoredAt - 1;
+  }, /archiveHistory overlap/);
+  assertInvalidArchiveHistory(closedJson, (habit) => {
+    habit.archiveHistory[0].restoredAt = habit.archiveHistory[0].archivedAt - 1;
+  }, /Invalid habits\[0\]\.archiveHistory/);
+  assertInvalidArchiveHistory(closedJson, (habit) => {
+    habit.archiveHistory[0].restoredAt = null;
+    habit.archiveHistory[0].restoredDate = null;
+    habit.isArchived = true;
+    habit.archivedAt = new Date(habit.archiveHistory[0].archivedAt).toISOString();
+  }, /archiveHistory open period/);
+  assertInvalidArchiveHistory(closedJson, (habit) => {
+    for (const period of habit.archiveHistory) {
+      period.restoredAt = null;
+      period.restoredDate = null;
+    }
+  }, /archiveHistory open period/);
+  assertInvalidArchiveHistory(closedJson, (habit) => {
+    habit.archiveHistory[1].restoredAt = null;
+    habit.archiveHistory[1].restoredDate = null;
+  }, /active state/);
+  assertInvalidArchiveHistory(closedJson, (habit) => {
+    habit.isArchived = true;
+    habit.archivedAt = new Date(habit.archiveHistory[1].archivedAt).toISOString();
+  }, /archived state/);
+  assertInvalidArchiveHistory(closedJson, (habit) => {
+    habit.archiveHistory[1].restoredAt = null;
+    habit.archiveHistory[1].restoredDate = null;
+    habit.isArchived = true;
+    habit.archivedAt = new Date(habit.archiveHistory[1].archivedAt + 1).toISOString();
+  }, /archived state/);
+  assertInvalidArchiveHistory(closedJson, (habit) => {
+    habit.archiveHistory[0].archivedDate = "2032-02-30";
+  }, /Invalid habits\[0\]\.archiveHistory\[0\]/);
+  assertInvalidArchiveHistory(closedJson, (habit) => {
+    delete habit.archiveHistory[0].archivedDate;
+  }, /Invalid habits\[0\]\.archiveHistory\[0\]/);
+  assertInvalidArchiveHistory(closedJson, (habit) => {
+    habit.archiveHistory[1].restoredAt = null;
+  }, /archiveHistory\[1\]\.restoredDate/);
+}
+
+void withAuditDeadline(async () => {
+  await auditBoundedImportRead();
+  await auditArchiveTimezoneRoundTrip();
+}, "Export compatibility audit")
   .then(() => {
     console.log("Export compatibility baseline audit passed.");
   })

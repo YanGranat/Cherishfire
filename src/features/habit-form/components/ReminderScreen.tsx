@@ -17,6 +17,7 @@ import { Dialog } from "@/components/ui/Dialog";
 import {
   useVisualColorScheme,
   useVisualEffectiveMode,
+  useVisualLanguage,
 } from "@/components/ScreenPreferencesBoundary";
 import { getAccentScheme } from "@/theme/colors";
 import {
@@ -26,6 +27,7 @@ import {
   removeReminderTimeIntent,
 } from "@/domain/reminders/reminder-time";
 import { useRetainedModalSession } from "@/hooks/useRetainedModalSession";
+import { ReminderPermissionNotice } from "@/features/reminders/components/ReminderPermissionNotice";
 interface ReminderScreenProps {
   visible: boolean;
   enabled: boolean;
@@ -60,6 +62,7 @@ function ReminderScreenSession({
   onDismiss,
 }: ReminderScreenSessionProps) {
   const { t } = useTranslation();
+  const language = useVisualLanguage();
   const colorScheme = useVisualColorScheme();
   const effectiveMode = useVisualEffectiveMode();
   const isDark = effectiveMode === "dark";
@@ -527,6 +530,10 @@ function ReminderScreenSession({
         </Text>
       ) : null}
 
+      {enabled ? (
+        <ReminderPermissionNotice observePermission={visible} />
+      ) : null}
+
       {enabled &&
       (pickerIndex != null || isAddingTime) &&
       renderedIOSPickerSession != null &&
@@ -538,6 +545,7 @@ function ReminderScreenSession({
             mode="time"
             is24Hour
             display="spinner"
+            locale={language}
             accentColor={accent}
             themeVariant={isDark ? "dark" : "light"}
             style={{ width: iosTimePickerWidth }}

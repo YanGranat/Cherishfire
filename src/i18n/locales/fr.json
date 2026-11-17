@@ -32,13 +32,13 @@
     "tabDays": "JOURS",
     "tabMonthly": "MENSUEL",
     "tabInterval": "INTERVALLE",
-    "everyNDays_one": "Tous les {{count}} jour",
+    "everyNDays_one": "Chaque jour",
     "everyNDays_few": "Tous les {{count}} jours",
     "everyNDays_many": "Tous les {{count}} jours",
     "everyNDays_other": "Tous les {{count}} jours",
     "dayOfMonth_one": "{{count}}",
     "dayOfMonth_other": "{{count}}",
-    "fromCompletion": "Depuis completion",
+    "fromCompletion": "Depuis la réalisation",
     "decreaseInterval": "Réduire l’intervalle",
     "increaseInterval": "Augmenter l’intervalle",
     "intervalValue": "Intervalle en jours"
@@ -109,7 +109,7 @@
   },
   "failureDialog": {
     "title": "Raison de l’échec",
-    "skipTitle": "Raison du saut",
+    "skipTitle": "Raison de l’omission",
     "placeholder": "Entrez la raison (optionnel)",
     "skip": "Passer",
     "save": "Enregistrer"
@@ -133,6 +133,9 @@
     "retry": "Réessayer"
   },
   "notes": {
+    "discardTitle": "Abandonner les modifications ?",
+    "discardMessage": "Le texte non enregistré sera perdu.",
+    "discard": "Abandonner",
     "title": "Notes",
     "placeholder": "Nouvelle note...",
     "emptyTitle": "Aucune note pour le moment",
@@ -174,7 +177,7 @@
     "colorScheme": "Palette de couleurs",
     "language": "Langue",
     "askFailureReason": "Demander la raison de l’échec",
-    "askSkipReason": "Demander la raison du saut",
+    "askSkipReason": "Demander la raison de l’omission",
     "sound": "Son",
     "reminders": "Rappels",
     "showArchivedHabitsInStatistics": "Inclure les habitudes archivées dans les statistiques"
@@ -254,8 +257,9 @@
     "success": "Données importées",
     "errorTitle": "Erreur d’import",
     "errorMessage": "Le fichier est corrompu ou a un format invalide.",
+    "actionErrorMessage": "Impossible de terminer l’importation. Réessayez.",
     "previewTitle": "Remplacer les données actuelles ?",
-    "previewMessage": "Le fichier contient {{habits}} habitudes, {{archived}} archivées, {{records}} suivis et {{notes}} notes. Les données actuelles seront remplacées.",
+    "previewMessage": "Habitudes : {{habits}} (dont {{archived}} dans l’archive). Entrées de suivi : {{records}}. Notes : {{notes}}. Les données actuelles seront remplacées.",
     "replaceData": "Remplacer",
     "importing": "Importation..."
   },
@@ -289,7 +293,10 @@
     "timeLabel": "Heure du rappel",
     "addTime": "Ajouter une heure de rappel",
     "removeTime": "Supprimer le rappel de {{time}}",
-    "duplicateTime": "Utilisez une heure différente pour chaque rappel"
+    "duplicateTime": "Utilisez une heure différente pour chaque rappel",
+    "permissionBlocked": "Les notifications sont bloquées dans les réglages du système.",
+    "permissionUnavailable": "Les réglages des notifications sont indisponibles. Réessayez.",
+    "openSystemSettings": "Ouvrir les réglages système"
   },
   "accessibility": {
     "openHabit": "Ouvrir l’habitude",

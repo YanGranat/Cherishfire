@@ -32,10 +32,16 @@ export interface ScheduledHabitReminder {
   readonly scheduleKey: string | null;
 }
 
+export type ReminderPermissionStatus =
+  | "granted"
+  | "denied"
+  | "undetermined"
+  | "unavailable";
+
 export interface ReminderNotificationPort {
   /**
-   * Native per-application cap for pending local reminders. `null` means the
-   * adapter does not impose a known global cap and per-habit planning applies.
+   * Platform-specific application budget for pending local reminders. `null`
+   * leaves scheduling bounded only by the per-habit planner.
    */
   readonly pendingReminderLimit: number | null;
   /**
@@ -46,6 +52,7 @@ export interface ReminderNotificationPort {
   configure(options?: { refreshAndroidChannel?: boolean }): Promise<boolean>;
   /** Reads the current native permission without presenting system UI. */
   hasPermission(): Promise<boolean>;
+  readPermissionStatus(): Promise<ReminderPermissionStatus>;
   /** Requests permission only from an explicit user-owned reminder action. */
   requestPermission(): Promise<boolean>;
   getHabitReminderScheduleKey(input: ReminderNativeScheduleInput): string;

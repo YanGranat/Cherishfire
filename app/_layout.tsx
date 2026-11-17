@@ -10,6 +10,7 @@ import {
   View,
 } from "react-native";
 import { Stack, useNavigationContainerRef, useRouter } from "expo-router";
+import type { ErrorBoundaryProps } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { format } from "date-fns/format";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -142,20 +143,22 @@ function StartupState({
   error,
   errorMessage,
   onRetry,
+  mode,
 }: {
   error?: boolean;
   errorMessage?: string;
   onRetry?: () => void;
+  mode?: "light" | "dark";
 }) {
   const systemColorScheme = useNativeColorMode();
-  const isSystemDark = systemColorScheme === "dark";
-  const palette = isSystemDark ? darkTheme : lightTheme;
+  const isDarkTheme = (mode ?? systemColorScheme) === "dark";
+  const palette = isDarkTheme ? darkTheme : lightTheme;
   useLayoutEffect(() => {
-    setAndroidNavigationBarTheme(isSystemDark);
-  }, [isSystemDark]);
+    setAndroidNavigationBarTheme(isDarkTheme);
+  }, [isDarkTheme]);
   return (
     <>
-      <StatusBar style={isSystemDark ? "light" : "dark"} />
+      <StatusBar style={isDarkTheme ? "light" : "dark"} />
       <View
         style={{
           flex: 1,
@@ -260,6 +263,21 @@ export default function RootLayout() {
     <MigratedApp
       key={migrationAttempt}
       onRetry={() => setMigrationAttempt((attempt) => attempt + 1)}
+    />
+  );
+}
+
+export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
+  useEffect(() => { console.error("Screen rendering failed", error); }, [error]);
+  const theme = useSettingsStore((state) => state.theme);
+  const systemColorScheme = useNativeColorMode();
+  const mode = theme === "system" ? systemColorScheme : theme;
+  return (
+    <StartupState
+      error
+      errorMessage={i18n.t("common.dataErrorMessage")}
+      mode={mode === "dark" ? "dark" : "light"}
+      onRetry={() => { void retry(); }}
     />
   );
 }

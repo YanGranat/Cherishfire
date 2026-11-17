@@ -109,7 +109,7 @@
   },
   "failureDialog": {
     "title": "Motivo del fallimento",
-    "skipTitle": "Motivo del salto",
+    "skipTitle": "Motivo dell'omissione",
     "placeholder": "Inserisci il motivo (facoltativo)",
     "skip": "Salta",
     "save": "Salva"
@@ -133,6 +133,9 @@
     "retry": "Riprova"
   },
   "notes": {
+    "discardTitle": "Scartare le modifiche?",
+    "discardMessage": "Il testo non salvato andrà perso.",
+    "discard": "Scarta",
     "title": "Note",
     "placeholder": "Nuova nota...",
     "emptyTitle": "Ancora nessuna nota",
@@ -174,7 +177,7 @@
     "colorScheme": "Schema colori",
     "language": "Lingua",
     "askFailureReason": "Chiedi il motivo del fallimento",
-    "askSkipReason": "Chiedi il motivo del salto",
+    "askSkipReason": "Chiedi il motivo dell'omissione",
     "sound": "Suono",
     "reminders": "Promemoria",
     "showArchivedHabitsInStatistics": "Includi le abitudini archiviate nelle statistiche"
@@ -254,8 +257,9 @@
     "success": "Dati importati",
     "errorTitle": "Errore di importazione",
     "errorMessage": "Il file è danneggiato o ha un formato non valido.",
+    "actionErrorMessage": "Impossibile completare l'importazione. Riprova.",
     "previewTitle": "Sostituire i dati attuali?",
-    "previewMessage": "Il file contiene {{habits}} abitudini, {{archived}} archiviate, {{records}} registrazioni e {{notes}} note. I dati attuali verranno sostituiti.",
+    "previewMessage": "Abitudini: {{habits}} (di cui {{archived}} in archivio). Registrazioni: {{records}}. Note: {{notes}}. I dati attuali verranno sostituiti.",
     "replaceData": "Sostituisci",
     "importing": "Importazione..."
   },
@@ -288,8 +292,11 @@
     "notificationBody": "È il momento della tua abitudine: {{name}}",
     "timeLabel": "Ora del promemoria",
     "addTime": "Aggiungi orario promemoria",
-    "removeTime": "Rimuovi il promemoria delle {{time}}",
-    "duplicateTime": "Usa un orario diverso per ogni promemoria"
+    "removeTime": "Rimuovi il promemoria: {{time}}",
+    "duplicateTime": "Usa un orario diverso per ogni promemoria",
+    "permissionBlocked": "Le notifiche sono bloccate nelle impostazioni di sistema.",
+    "permissionUnavailable": "Le impostazioni delle notifiche non sono disponibili. Riprova.",
+    "openSystemSettings": "Apri le impostazioni di sistema"
   },
   "accessibility": {
     "openHabit": "Apri abitudine",

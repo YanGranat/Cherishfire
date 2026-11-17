@@ -4,7 +4,7 @@
 
 An offline habit tracker with flexible schedules, notes, and progress statistics.
 
-[Download APK](https://github.com/YanGranat/Cherishfire/releases/download/v1.5.117/Cherishfire-1.5.117-android.apk)
+[Download APK](https://github.com/YanGranat/Cherishfire/releases/download/v1.5.125/Cherishfire-1.5.125-android.apk)
 
 ## Features
 

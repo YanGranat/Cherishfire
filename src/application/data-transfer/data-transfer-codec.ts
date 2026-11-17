@@ -737,12 +737,11 @@ function validateArchiveSemantics(
     const period = history[index];
     if (index > 0) {
       const previous = history[index - 1];
+      // Captured local dates can overlap after a timezone change.
       if (
         period.archivedAt < previous.archivedAt ||
         (previous.restoredAt != null &&
-          period.archivedAt < previous.restoredAt) ||
-        (previous.restoredDate != null &&
-          (period.archivedDate ?? "") < previous.restoredDate)
+          period.archivedAt < previous.restoredAt)
       ) {
         throw new Error(`Invalid ${field}.archiveHistory overlap`);
       }

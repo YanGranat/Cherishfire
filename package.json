@@ -1,6 +1,6 @@
 {
   "name": "cherishfire",
-  "version": "1.5.122",
+  "version": "1.5.125",
   "description": "Local-first Expo habit tracker with multi-state completion, notes, reminders, and rich statistics.",
   "main": "expo-router/entry",
   "license": "MIT",
@@ -20,7 +20,7 @@
     "android": "expo prebuild --clean --platform android --no-install && expo run:android",
     "ios": "expo prebuild --clean --platform ios --no-install && expo run:ios",
     "web": "expo start --web",
-    "lint": "expo lint",
+    "lint": "expo lint app src scripts plugins *.config.js",
     "typecheck": "tsc --noEmit",
     "doctor": "expo-doctor",
     "check": "npm run lint && npm run typecheck && npm run audit:architecture && npm run audit:database-runtime && npm run audit:settings-mutations && npm run audit:settings-navigation && npm run audit:startup-lifecycle && npm run audit:startup-data && npm run audit:theme-rendering && npm run audit:about-dialog && npm run audit:habit-persistence && npm run audit:habit-record-identity && npm run audit:habit-cache && npm run audit:habit-day-rollback && npm run audit:habit-detail && npm run audit:notes-cache && npm run audit:persistence-commit-scheduler && npm run audit:scene-structure && npm run audit:interaction-coordinators && npm run audit:app-modal-lifecycle && npm run audit:i18n && npm run audit:colors && npm run audit:archive && npm run audit:schedule && npm run audit:streak && npm run audit:repeat-monthly-draft && npm run audit:repeat-interval-draft && npm run audit:date-picker-cache && npm run audit:current-local-date && npm run audit:data-transfer && npm run audit:export-compatibility && npm run audit:stats-progress && npm run audit:stats-reorder && npm run audit:reminders && npm run audit:bundle-size && npm run audit:home-interactions && npm run audit:settings-language-effects && npm run audit:safety",
@@ -135,6 +135,7 @@
     "eslint": "^9.0.0",
     "eslint-config-expo": "~10.0.0",
     "expo-doctor": "1.20.4",
+    "jsc-safe-url": "0.2.4",
     "tsx": "4.23.13",
     "typescript": "^5.9.3"
   }

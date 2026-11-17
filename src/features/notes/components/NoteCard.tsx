@@ -55,6 +55,7 @@ interface NoteCardProps {
     sequence: number;
     text: string;
   } | null;
+  onRecoveryApplied?: (id: number, sequence: number) => void;
   onSave: (id: number, text: string) => boolean;
   onDelete: (id: number) => void;
   onEditingChange?: (
@@ -99,6 +100,7 @@ function NoteCardComponent({
   note,
   editorSession,
   recoveryDraft,
+  onRecoveryApplied,
   onSave,
   onDelete,
   onEditingChange,
@@ -248,11 +250,14 @@ function NoteCardComponent({
     // persistence rollback may replace
     // note.text with an older value, but it must never silently replace the
     // value that the user can still see and save.
-    if (editingRef.current) return;
+    if (editingRef.current) {
+      editorSession.update(note.clientMutationId, { sourceText: note.text });
+      return;
+    }
     draftTextRef.current = note.text;
     draftBaseTextRef.current = note.text;
     updateDraftAvailability(note.text);
-  }, [note.text, updateDraftAvailability]);
+  }, [editorSession, note.clientMutationId, note.text, updateDraftAvailability]);
   useEffect(() => {
     if (!editing) return;
     focusFrameRef.current = requestAnimationFrame(() => {
@@ -302,12 +307,12 @@ function NoteCardComponent({
     return true;
   }, [leaveEditing, note.id, onSave]);
   const enterEditing = React.useCallback(
-    (initialDraft = note.text, placeCursorAtEnd = false) => {
-      if (!editorOwner.live) return;
-      if (editingRef.current) return;
+    (initialDraft = note.text, placeCursorAtEnd = false): boolean => {
+      if (!editorOwner.live) return false;
+      if (editingRef.current) return true;
       const accepted = onEditingChange?.(note.id, true, saveForEditorHandoff, editorOwner);
       if (accepted === false) {
-        return;
+        return false;
       }
       // Keep the native input's initial value stable until it unmounts. The
       // live draft is read separately by Save/handoff and recovery commands.
@@ -332,6 +337,7 @@ function NoteCardComponent({
         noteId: note.id,
         text: initialDraft,
         baseText: initialDraft,
+        sourceText: note.text,
         recoverySequence: appliedRecoverySequenceRef.current,
         viewportHeight: readTextLayoutHeightRef.current,
       });
@@ -340,6 +346,7 @@ function NoteCardComponent({
       // native focus transfer completes; unmounting the old Android focus owner
       // here can close and immediately reopen the keyboard.
       setEditing(true);
+      return true;
     },
     [
       cancelGeometryFrame,
@@ -365,19 +372,26 @@ function NoteCardComponent({
     [cancelGeometryFrame],
   );
   useLayoutEffect(() => {
-    if (
-      !recoveryDraft ||
-      recoveryDraft.sequence <= appliedRecoverySequenceRef.current
-    ) {
+    if (!recoveryDraft) return;
+    if (recoveryDraft.sequence <= appliedRecoverySequenceRef.current) {
       return;
     }
-    appliedRecoverySequenceRef.current = recoveryDraft.sequence;
     const nextDraft = mergeRecoveredDraft(
       recoveryDraft.text,
       draftTextRef.current,
       note.text,
       draftBaseTextRef.current,
     );
+    if (!editingRef.current) {
+      if (!enterEditing(nextDraft)) return;
+      appliedRecoverySequenceRef.current = recoveryDraft.sequence;
+      editorSession.update(note.clientMutationId, {
+        recoverySequence: recoveryDraft.sequence,
+      });
+      onRecoveryApplied?.(note.id, recoveryDraft.sequence);
+      return;
+    }
+    appliedRecoverySequenceRef.current = recoveryDraft.sequence;
     const previousDraft = draftTextRef.current;
     lastEditMayShrinkRef.current =
       nextDraft.length < previousDraft.length ||
@@ -389,6 +403,7 @@ function NoteCardComponent({
     editorSelectionRef.current = null;
     editorSession.update(note.clientMutationId, {
       text: nextDraft,
+      sourceText: note.text,
       recoverySequence: recoveryDraft.sequence,
     });
     if (editingRef.current) {
@@ -401,10 +416,10 @@ function NoteCardComponent({
         if (!editorOwner.live || !editingRef.current) return;
         publishEditorGeometry();
       });
+      onRecoveryApplied?.(note.id, recoveryDraft.sequence);
       return;
     }
-    enterEditing(nextDraft);
-  }, [editorOwner, editorSession, enterEditing, note.clientMutationId, note.text, publishEditorGeometry, queueEditorGeometry, recoveryDraft, updateDraftAvailability]);
+  }, [editing, editorOwner, editorSession, enterEditing, note.clientMutationId, note.id, note.text, onRecoveryApplied, publishEditorGeometry, queueEditorGeometry, recoveryDraft, updateDraftAvailability]);
   const handleEditorFocus = () => {
     if (!editorOwner.live || !editingRef.current) return;
     if (initialEndSelectionPendingRef.current && inputRef.current != null) {

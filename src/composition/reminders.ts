@@ -7,10 +7,23 @@ import { createReminderSnapshotReader } from "@/application/reminders/reminder-s
 import { sqliteReminderDayRecordRepository } from "@/data/sqlite/reminder-day-record-repository";
 import { habitPersistence } from "@/composition/habits";
 import { settingsRepository } from "@/data/sqlite/settings-repository";
-import { createExpoReminderNotificationAdapter } from "@/platform/notifications/expo-reminder-notification-adapter";
+import {
+  createExpoReminderNotificationAdapter,
+  openReminderSystemSettings,
+} from "@/platform/notifications/expo-reminder-notification-adapter";
+import {
+  createReminderPermissionStatusStore,
+  withReminderPermissionStatusRefresh,
+} from "@/application/reminders/reminder-permission-status";
 import { reactNativeReminderWorkScheduling } from "@/platform/react-native/reminder-work-scheduling";
 import { reminderClock } from "@/platform/time/reminder-clock";
 import type { Habit } from "@/types/habit";
+
+const notificationAdapter = createExpoReminderNotificationAdapter();
+export const reminderPermissionStatus = createReminderPermissionStatusStore({
+  readPermissionStatus: () => notificationAdapter.readPermissionStatus(),
+  openSystemSettings: openReminderSystemSettings,
+});
 
 const reminderService = createReminderService({
   snapshot: createReminderSnapshotReader({
@@ -18,7 +31,10 @@ const reminderService = createReminderService({
     readSettings: settingsRepository.readAll,
   }),
   dayRecords: sqliteReminderDayRecordRepository,
-  notifications: createExpoReminderNotificationAdapter(),
+  notifications: withReminderPermissionStatusRefresh(
+    notificationAdapter,
+    reminderPermissionStatus.refreshIfObserved,
+  ),
   workScheduling: reactNativeReminderWorkScheduling,
   clock: reminderClock,
 });

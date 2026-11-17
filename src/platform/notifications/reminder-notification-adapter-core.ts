@@ -1,13 +1,16 @@
 import { format } from "date-fns/format";
+import type { ReminderSchedulingJournal } from "@/platform/notifications/reminder-scheduling-journal";
 import type {
   ReminderNativeScheduleInput,
   ReminderNotificationPort,
+  ReminderPermissionStatus,
   ScheduledHabitReminder,
 } from "@/application/reminders/reminder-ports";
 
 const REMINDER_NOTIFICATION_KIND = "habit-reminder-v1";
 const REMINDER_ANDROID_CHANNEL_ID = "habit-reminders";
 export const IOS_PENDING_REMINDER_LIMIT = 64;
+export const ANDROID_PENDING_REMINDER_LIMIT = 500;
 const HANDLED_REMINDER_RESPONSE_IDENTIFIER_LIMIT = 64;
 const processHandledResponseIdentifiers = new Set<string>();
 
@@ -40,6 +43,7 @@ interface NativeNotificationResponse {
 
 interface NativeNotificationPermissionStatus {
   readonly granted: boolean;
+  readonly status?: string;
   readonly ios?: {
     readonly status: number;
   };
@@ -71,6 +75,7 @@ export interface ReminderNotificationsNativeModule {
     };
   }): Promise<NativeNotificationPermissionStatus>;
   scheduleNotificationAsync(request: {
+    readonly identifier: string;
     readonly content: {
       readonly title: string;
       readonly body: string;
@@ -112,6 +117,8 @@ export interface ReminderNotificationsNativeModule {
 export interface ReminderNotificationAdapterDependencies {
   readonly platform: string;
   loadModule(): Promise<ReminderNotificationsNativeModule>;
+  createNotificationIdentifier(): string;
+  readonly schedulingJournal: ReminderSchedulingJournal;
   readonly copy: {
     channelName(): string;
     notificationTitle(): string;
@@ -154,10 +161,54 @@ export function createReminderNotificationAdapter(
   let moduleCache: ReminderNotificationsNativeModule | null | undefined;
   let modulePromise: Promise<ReminderNotificationsNativeModule | null> | null =
     null;
+  let schedulingQueue: Promise<void> = Promise.resolve();
+  let pendingSchedulingIdentifiers: readonly string[] | null | undefined;
   const responseSubscribers = new Map<number, ResponseSubscriber>();
   let nextResponseSubscriberId = 1;
   let nativeResponseSubscription: { remove(): void } | null = null;
   let nativeResponseListenerInstallInProgress = false;
+
+  function runSchedulingOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const queued = schedulingQueue.then(operation);
+    schedulingQueue = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  }
+
+  async function recoverPendingScheduling(
+    module: ReminderNotificationsNativeModule,
+  ): Promise<void> {
+    if (pendingSchedulingIdentifiers === undefined) {
+      pendingSchedulingIdentifiers = await dependencies.schedulingJournal.read();
+    }
+    if (pendingSchedulingIdentifiers === null) {
+      const requests = await module.getAllScheduledNotificationsAsync();
+      for (const request of requests) {
+        if (toReminderDataHabitId(request.content.data) != null) {
+          await module.cancelScheduledNotificationAsync(request.identifier);
+        }
+      }
+      await dependencies.schedulingJournal.write([]);
+      pendingSchedulingIdentifiers = [];
+      return;
+    }
+    if (pendingSchedulingIdentifiers.length === 0) return;
+    const requests = await module.getAllScheduledNotificationsAsync();
+    const requestsByIdentifier = new Map(
+      requests.map((request) => [request.identifier, request]),
+    );
+    for (const identifier of pendingSchedulingIdentifiers) {
+      const request = requestsByIdentifier.get(identifier);
+      if (request && toReminderDataHabitId(request.content.data) == null) {
+        continue;
+      }
+      await module.cancelScheduledNotificationAsync(identifier);
+    }
+    await dependencies.schedulingJournal.write([]);
+    pendingSchedulingIdentifiers = [];
+  }
 
   function getHabitReminderScheduleKey(
     input: ReminderNativeScheduleInput,
@@ -359,6 +410,14 @@ export function createReminderNotificationAdapter(
     return isPermissionGranted(module, current);
   }
 
+  async function readPermissionStatus(): Promise<ReminderPermissionStatus> {
+    const module = await getModule();
+    if (!module) return "unavailable";
+    const permission = await module.getPermissionsAsync();
+    if (isPermissionGranted(module, permission)) return "granted";
+    return permission.status === "denied" ? "denied" : "undetermined";
+  }
+
   async function requestPermission(): Promise<boolean> {
     if (permissionRequestPromise) return permissionRequestPromise;
 
@@ -388,51 +447,75 @@ export function createReminderNotificationAdapter(
   async function listScheduledHabitReminders(): Promise<
     Map<number, ScheduledHabitReminder[]>
   > {
-    const module = await getModule();
-    if (!module) return new Map();
+    return runSchedulingOperation(async () => {
+      const module = await getModule();
+      if (!module) return new Map();
+      await recoverPendingScheduling(module);
 
-    const requests = await module.getAllScheduledNotificationsAsync();
-    const byHabit = new Map<number, ScheduledHabitReminder[]>();
-    for (const request of requests) {
-      const habitId = toReminderDataHabitId(request.content.data);
-      if (habitId == null) continue;
-      const scheduled = {
-        identifier: request.identifier,
-        habitId,
-        scheduleKey: toReminderDataScheduleKey(request.content.data),
-      };
-      const existing = byHabit.get(habitId);
-      if (existing) existing.push(scheduled);
-      else byHabit.set(habitId, [scheduled]);
-    }
-    return byHabit;
+      const requests = await module.getAllScheduledNotificationsAsync();
+      const byHabit = new Map<number, ScheduledHabitReminder[]>();
+      for (const request of requests) {
+        const habitId = toReminderDataHabitId(request.content.data);
+        if (habitId == null) continue;
+        const scheduled = {
+          identifier: request.identifier,
+          habitId,
+          scheduleKey: toReminderDataScheduleKey(request.content.data),
+        };
+        const existing = byHabit.get(habitId);
+        if (existing) existing.push(scheduled);
+        else byHabit.set(habitId, [scheduled]);
+      }
+      return byHabit;
+    });
   }
 
   async function scheduleHabitReminder(
     input: ReminderNativeScheduleInput,
   ): Promise<void> {
-    const module = await getModule();
-    if (!module) return;
+    return runSchedulingOperation(async () => {
+      const module = await getModule();
+      if (!module) return;
+      await recoverPendingScheduling(module);
 
-    await module.scheduleNotificationAsync({
-      content: {
-        title: dependencies.copy.notificationTitle(),
-        body: dependencies.copy.notificationBody(input.habitName),
-        sound: "default",
-        data: {
-          kind: REMINDER_NOTIFICATION_KIND,
-          habitId: input.habitId,
-          date: format(input.date, "yyyy-MM-dd"),
-          scheduleKey: getHabitReminderScheduleKey(input),
-        },
-      },
-      trigger: {
-        type: module.SchedulableTriggerInputTypes.DATE,
-        date: input.date,
-        ...(dependencies.platform === "android"
-          ? { channelId: REMINDER_ANDROID_CHANNEL_ID }
-          : {}),
-      },
+      const identifier = dependencies.createNotificationIdentifier();
+      // Native scheduling can persist a request before admitting its alarm.
+      await dependencies.schedulingJournal.write([identifier]);
+      pendingSchedulingIdentifiers = [identifier];
+      try {
+        await module.scheduleNotificationAsync({
+          identifier,
+          content: {
+            title: dependencies.copy.notificationTitle(),
+            body: dependencies.copy.notificationBody(input.habitName),
+            sound: "default",
+            data: {
+              kind: REMINDER_NOTIFICATION_KIND,
+              habitId: input.habitId,
+              date: format(input.date, "yyyy-MM-dd"),
+              scheduleKey: getHabitReminderScheduleKey(input),
+            },
+          },
+          trigger: {
+            type: module.SchedulableTriggerInputTypes.DATE,
+            date: input.date,
+            ...(dependencies.platform === "android"
+              ? { channelId: REMINDER_ANDROID_CHANNEL_ID }
+              : {}),
+          },
+        });
+      } catch (error) {
+        try {
+          await module.cancelScheduledNotificationAsync(identifier);
+          await dependencies.schedulingJournal.write([]);
+          pendingSchedulingIdentifiers = [];
+        } catch {
+          // The durable identifier remains quarantined until native cleanup succeeds.
+        }
+        throw error;
+      }
+      await dependencies.schedulingJournal.write([]);
+      pendingSchedulingIdentifiers = [];
     });
   }
 
@@ -464,16 +547,24 @@ export function createReminderNotificationAdapter(
 
   return {
     pendingReminderLimit:
-      dependencies.platform === "ios" ? IOS_PENDING_REMINDER_LIMIT : null,
+      dependencies.platform === "ios"
+        ? IOS_PENDING_REMINDER_LIMIT
+        : dependencies.platform === "android"
+          ? ANDROID_PENDING_REMINDER_LIMIT
+          : null,
     configure,
     hasPermission,
+    readPermissionStatus,
     requestPermission,
     getHabitReminderScheduleKey,
     listScheduledHabitReminders,
     async cancelScheduledReminder(identifier) {
-      const module = await getModule();
-      if (!module) return;
-      await module.cancelScheduledNotificationAsync(identifier);
+      return runSchedulingOperation(async () => {
+        const module = await getModule();
+        if (!module) return;
+        await recoverPendingScheduling(module);
+        await module.cancelScheduledNotificationAsync(identifier);
+      });
     },
     scheduleHabitReminder,
     subscribeToResponses,

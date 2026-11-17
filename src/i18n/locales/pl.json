@@ -8,8 +8,8 @@
     "titleYesterday": "Wczoraj",
     "titleTomorrow": "Jutro",
     "currentStreak": "Aktualna seria: {{count}}",
-    "showCompleted": "Pokaż ukończone",
-    "hideCompleted": "Ukryj ukończone",
+    "showCompleted": "Pokaż wykonane",
+    "hideCompleted": "Ukryj wykonane",
     "emptyState": ""
   },
   "creation": {
@@ -38,7 +38,7 @@
     "everyNDays_other": "Co {{count}} dnia",
     "dayOfMonth_one": "{{count}}.",
     "dayOfMonth_other": "{{count}}.",
-    "fromCompletion": "Od ukończenia",
+    "fromCompletion": "Od wykonania",
     "decreaseInterval": "Zmniejsz interwał",
     "increaseInterval": "Zwiększ interwał",
     "intervalValue": "Interwał w dniach"
@@ -133,6 +133,9 @@
     "retry": "Spróbuj ponownie"
   },
   "notes": {
+    "discardTitle": "Odrzucić zmiany?",
+    "discardMessage": "Niezapisany tekst zostanie utracony.",
+    "discard": "Odrzuć",
     "title": "Notatki",
     "placeholder": "Nowa notatka...",
     "emptyTitle": "Brak notatek",
@@ -254,8 +257,9 @@
     "success": "Dane zaimportowano",
     "errorTitle": "Błąd importu",
     "errorMessage": "Plik jest uszkodzony lub ma nieprawidłowy format.",
+    "actionErrorMessage": "Nie udało się zakończyć importu. Spróbuj ponownie.",
     "previewTitle": "Zastąpić obecne dane?",
-    "previewMessage": "Plik zawiera {{habits}} nawyków, {{archived}} zarchiwizowanych, {{records}} wpisów i {{notes}} notatek. Obecne dane zostaną zastąpione.",
+    "previewMessage": "Nawyki: {{habits}} (w tym zarchiwizowane: {{archived}}). Wpisy: {{records}}. Notatki: {{notes}}. Obecne dane zostaną zastąpione.",
     "replaceData": "Zastąp",
     "importing": "Importowanie..."
   },
@@ -289,7 +293,10 @@
     "timeLabel": "Godzina przypomnienia",
     "addTime": "Dodaj godzinę przypomnienia",
     "removeTime": "Usuń przypomnienie o {{time}}",
-    "duplicateTime": "Ustaw inną godzinę dla każdego przypomnienia"
+    "duplicateTime": "Ustaw inną godzinę dla każdego przypomnienia",
+    "permissionBlocked": "Powiadomienia są zablokowane w ustawieniach systemu.",
+    "permissionUnavailable": "Ustawienia powiadomień są niedostępne. Spróbuj ponownie.",
+    "openSystemSettings": "Otwórz ustawienia systemowe"
   },
   "accessibility": {
     "openHabit": "Otwórz nawyk",

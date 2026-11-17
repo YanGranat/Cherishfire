@@ -1032,7 +1032,7 @@ function auditCompositeStylingBoundaries(
         ts.isJsxAttribute(property) && property.name.getText(tree) === "style")?.initializer;
       assert.ok(viewportStyle && ts.isJsxExpression(viewportStyle) && viewportStyle.expression);
       extractedNoteViewport = loadSource(file, {}, () => `
-        export function style(editorKeyboardLift: number) {
+        export function style(editorBottomPadding: number) {
           return ${viewportStyle.expression!.getText(tree)};
         }`);
     }
@@ -1299,7 +1299,7 @@ for (const [file, before, after] of [
   ],
   [
     "app/habit/[id]/notes.tsx",
-    "paddingBottom: editorKeyboardLift",
+    "paddingBottom: editorBottomPadding",
     "paddingBottom: 0",
   ],
   [

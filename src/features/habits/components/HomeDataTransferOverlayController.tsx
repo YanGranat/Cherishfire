@@ -135,9 +135,7 @@ export const HomeDataTransferOverlayController = memo(
       createEmptyDataTransferOverlaySlot<HomeDataTransferOverlayRequest>();
     const overlaySlotRef = useRef(initialOverlaySlot);
     const [overlaySlot, setOverlaySlot] = useState(initialOverlaySlot);
-    const [pendingImportError, setPendingImportError] = useState<string | null>(
-      null,
-    );
+    const [pendingImportError, setPendingImportError] = useState(false);
     const [isImporting, setIsImporting] = useState(false);
     const [exportFence] = useState(createSynchronousActionFence);
     const [chooseFileFence] = useState(createSynchronousActionFence);
@@ -215,7 +213,7 @@ export const HomeDataTransferOverlayController = memo(
       const requestToken = pendingImportApplyTokenRef.current;
       if (requestToken == null || isImporting) return;
       const hasTerminalUi =
-        pendingImportError != null ||
+        pendingImportError ||
         slotContainsStatusForImport(overlaySlot, requestToken);
       if (!hasTerminalUi) return;
       applyImportFence.release(requestToken);
@@ -254,7 +252,7 @@ export const HomeDataTransferOverlayController = memo(
         try {
           const data = normalizeImportData(json);
           const preview = previewNormalizedImportData(data);
-          setPendingImportError(null);
+          setPendingImportError(false);
           enqueueOverlay({
             kind: "import-preview",
             data,
@@ -303,7 +301,7 @@ export const HomeDataTransferOverlayController = memo(
           createStatusRequest(
             {
               title: translate("import.errorTitle"),
-              message: translate("import.errorMessage"),
+              message: translate("import.actionErrorMessage"),
             },
             translate,
           ),
@@ -328,7 +326,7 @@ export const HomeDataTransferOverlayController = memo(
       const data = currentSlot.current.data;
       pendingImportApplyTokenRef.current = requestToken;
       setIsImporting(true);
-      setPendingImportError(null);
+      setPendingImportError(false);
       try {
         const publishImportedSnapshot = async () => {
           const habitStore = useHabitStore.getState();
@@ -372,8 +370,7 @@ export const HomeDataTransferOverlayController = memo(
               pendingImportPublicationRecoveryRef.current =
                 imported.retryPublication;
             }
-            const translate = currentTransferTranslator();
-            setPendingImportError(translate("import.errorMessage"));
+            setPendingImportError(true);
             return;
           }
         }
@@ -391,8 +388,7 @@ export const HomeDataTransferOverlayController = memo(
         );
       } catch (error) {
         console.error("Failed to apply import", error);
-        const translate = currentTransferTranslator();
-        setPendingImportError(translate("import.errorMessage"));
+        setPendingImportError(true);
       } finally {
         setIsImporting(false);
       }
@@ -510,7 +506,7 @@ export const HomeDataTransferOverlayController = memo(
                   archived: importPreviewOverlay.preview.archivedHabitsCount,
                   records: importPreviewOverlay.preview.dayRecordsCount,
                   notes: importPreviewOverlay.preview.notesCount,
-                })}${pendingImportError ? `\n\n${pendingImportError}` : ""}`
+                })}${pendingImportError ? `\n\n${t("import.actionErrorMessage")}` : ""}`
               : undefined
           }
           contentBackgroundColor={contentBackgroundColor}
@@ -519,7 +515,7 @@ export const HomeDataTransferOverlayController = memo(
             {
               label: t("import.cancel"),
               onPress: () => {
-                setPendingImportError(null);
+                setPendingImportError(false);
                 closeOverlay("import-preview");
               },
               role: "cancel",

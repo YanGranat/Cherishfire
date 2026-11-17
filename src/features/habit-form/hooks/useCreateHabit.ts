@@ -25,11 +25,10 @@ export function useCreateHabit() {
       createInFlightRef.current = true;
       setError(null);
       try {
-        // createHabit adds an optimistic row before its first await. Return to
-        // the already-mounted main screen immediately while SQLite confirms it.
-        const persistence = createHabit(input);
-        router.back();
-        await persistence;
+        // Keep the form and its draft until the write succeeds. A failed write
+        // must remain retryable without making the user enter the habit again.
+        await createHabit(input);
+        if (isMountedRef.current) router.back();
         return true;
       } catch (createError) {
         console.error("Failed to create habit", createError);

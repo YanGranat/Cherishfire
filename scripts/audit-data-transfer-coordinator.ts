@@ -774,7 +774,7 @@ async function auditCommittedImportUiOwnership(): Promise<void> {
       ),
     };
     let isImporting = false;
-    let pendingImportError: string | null = null;
+    let pendingImportError = false;
     let replacements = 0;
     let retries = 0;
     const gate = deferred<void>();
@@ -789,7 +789,7 @@ async function auditCommittedImportUiOwnership(): Promise<void> {
         setIsImporting: (value: boolean) => {
           isImporting = value;
         },
-        setPendingImportError: (value: string | null) => {
+        setPendingImportError: (value: boolean) => {
           pendingImportError = value;
         },
         currentTransferTranslator: () => translate,

@@ -37,11 +37,11 @@ export default function ArchiveScreen() {
   const archivedHabits = useHabitStore(getArchivedHabitsForState);
   const allHabitsLoaded = useHabitStore((s) => s.allHabitsLoaded);
   const loadHabits = useHabitStore((s) => s.loadHabits);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
   // A failed load leaves the global cache unresolved. The error is nevertheless
   // terminal for this attempt and must replace the spinner so Retry is reachable.
-  const isLoading = !allHabitsLoaded && loadError == null;
-  const [actionError, setActionError] = useState<string | null>(null);
+  const isLoading = !allHabitsLoaded && !loadError;
+  const [actionError, setActionError] = useState(false);
   const [pendingHabitId, setPendingHabitId] = useState<number | null>(null);
   const [deleteDialog, setDeleteDialog] = useState<{
     visible: boolean;
@@ -51,16 +51,16 @@ export default function ArchiveScreen() {
   const [isApplyingDialogAction, setIsApplyingDialogAction] = useState(false);
   const archiveMutationBusyRef = useRef(false);
   const loadArchive = useCallback(async () => {
-    setLoadError(null);
+    setLoadError(false);
     try {
       await loadHabits();
       if (!useHabitStore.getState().allHabitsLoaded) {
-        setLoadError(t("archive.loadError"));
+        setLoadError(true);
       }
     } catch {
-      setLoadError(t("archive.loadError"));
+      setLoadError(true);
     }
-  }, [loadHabits, t]);
+  }, [loadHabits]);
   useEffect(() => {
     if (!allHabitsLoaded) void loadArchive();
   }, [allHabitsLoaded, loadArchive]);
@@ -71,17 +71,17 @@ export default function ArchiveScreen() {
       }
       archiveMutationBusyRef.current = true;
       setPendingHabitId(id);
-      setActionError(null);
+      setActionError(false);
       try {
         await restoreHabits([id]);
       } catch {
-        setActionError(t("archive.actionError"));
+        setActionError(true);
       } finally {
         archiveMutationBusyRef.current = false;
         setPendingHabitId(null);
       }
     },
-    [restoreHabits, t],
+    [restoreHabits],
   );
   const handleDeleteRequest = useCallback((id: number) => {
     setDeleteDialog({
@@ -144,7 +144,7 @@ export default function ArchiveScreen() {
     archiveMutationBusyRef.current = true;
     const currentDialog = deleteDialog;
     setIsApplyingDialogAction(true);
-    setActionError(null);
+    setActionError(false);
     const d = currentDialog;
     setDeleteDialog({ ...currentDialog, visible: false });
     try {
@@ -156,7 +156,7 @@ export default function ArchiveScreen() {
         await handleRestoreAll();
       }
     } catch {
-      setActionError(t("archive.actionError"));
+      setActionError(true);
     } finally {
       archiveMutationBusyRef.current = false;
       setIsApplyingDialogAction(false);
@@ -225,7 +225,9 @@ export default function ArchiveScreen() {
         rightActions={headerActions}
       />
 
-      {actionError ? <InlineErrorBanner message={actionError} /> : null}
+      {actionError ? (
+        <InlineErrorBanner message={t("archive.actionError")} />
+      ) : null}
 
       {isLoading ? (
         <View className="flex-1 items-center justify-center">
@@ -234,7 +236,7 @@ export default function ArchiveScreen() {
       ) : loadError ? (
         <View className="flex-1 items-center justify-center px-xl">
           <Text className="text-muted text-base text-center mb-md">
-            {loadError}
+            {t("archive.loadError")}
           </Text>
           <Pressable
             onPress={() => {

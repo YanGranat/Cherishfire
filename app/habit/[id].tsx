@@ -132,7 +132,8 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
     text: string;
   } | null>(null);
   const descriptionRecoverySequenceRef = useRef(0);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState(false);
+  const actionErrorMessage = actionError ? t("detail.actionError") : null;
   const actionVersionsRef = useRef(new Map<string, number>());
   const saveDescriptionHandlerRef = useRef<(() => void) | null>(null);
   const registerDescriptionSaveHandler = useCallback(
@@ -161,7 +162,7 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
         action === "repeat" || action === "start-date" ? "schedule" : action;
       const version = (actionVersionsRef.current.get(actionScope) ?? 0) + 1;
       actionVersionsRef.current.set(actionScope, version);
-      setActionError(null);
+      setActionError(false);
       // SQLite already has one serial owner. Start each store mutation in the
       // user's event turn so a newer schedule/date intent can claim ownership
       // before an older database operation publishes its result.
@@ -179,12 +180,12 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
           );
           const isLatest =
             actionVersionsRef.current.get(actionScope) === version;
-          if (isLatest) setActionError(t("detail.actionError"));
+          if (isLatest) setActionError(true);
           return { succeeded: false, isLatest };
         }
       })();
     },
-    [t],
+    [],
   );
   const handleDescriptionSave = useCallback(
     (text: string) => {
@@ -212,7 +213,7 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
     if (!habitRef.current || habitRef.current.isArchived) {
       return;
     }
-    setActionError(null);
+    setActionError(false);
     const previousDescriptionVisible = habitRef.current.descriptionVisible;
     const descriptionVisible = !previousDescriptionVisible;
     patchHabit({ descriptionVisible });
@@ -267,7 +268,7 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
       console.error("Failed to delete habit", deleteError);
     });
   }, [claimTerminalMutation, deleteHabit, habitId, router]);
-  const clearActionError = useCallback(() => setActionError(null), []);
+  const clearActionError = useCallback(() => setActionError(false), []);
   // Calendar data stays referentially stable while unrelated detail UI changes.
   const dayData = useMemo(
     () =>
@@ -282,11 +283,11 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
     (date: string, status: DayStatus, reason?: string) => {
       void markDay(habitId, date, status, reason).then(async (succeeded) => {
         if (succeeded) return;
-        setActionError(t("detail.actionError"));
+        setActionError(true);
         await reload();
       });
     },
-    [habitId, markDay, reload, t],
+    [habitId, markDay, reload],
   );
   const handleDayStatusApply = useCallback(
     (command: HabitDetailDayStatusCommand) => {
@@ -308,11 +309,11 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
     (date: string) => {
       void unmarkDay(habitId, date).then(async (succeeded) => {
         if (succeeded) return;
-        setActionError(t("detail.actionError"));
+        setActionError(true);
         await reload();
       });
     },
-    [habitId, reload, t, unmarkDay],
+    [habitId, reload, unmarkDay],
   );
   // Day tap: toggle done/unmarked
   const handleDayPress = useCallback(
@@ -624,7 +625,9 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
           rightActions={headerActions}
         />
 
-        {actionError ? <InlineErrorBanner message={actionError} /> : null}
+        {actionErrorMessage ? (
+          <InlineErrorBanner message={actionErrorMessage} />
+        ) : null}
 
         {/* Description */}
         <InlineDescription
@@ -675,7 +678,7 @@ function HabitDetailScreenContent({ habitId }: { habitId: number }) {
           habitName={habit.name}
           descriptionVisible={habit.descriptionVisible}
           isArchived={isArchived}
-          actionError={actionError}
+          actionError={actionErrorMessage}
           onClearActionError={clearActionError}
           onToggleDescription={handleToggleDescription}
           onRename={handleRename}

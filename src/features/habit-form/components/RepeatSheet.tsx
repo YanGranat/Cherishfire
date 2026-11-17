@@ -215,6 +215,7 @@ function RepeatSheetContent({
             onPress={handleApply}
             accessibilityRole="button"
             accessibilityLabel={t("repeat.done")}
+            hitSlop={{ top: 9, bottom: 9 }}
             className="py-xs px-sm active:opacity-60"
           >
             <Text style={{ color: accent, fontWeight: "600", fontSize: 14 }}>
@@ -255,6 +256,8 @@ function RepeatSheetContent({
                 >
                   <Text
                     className="font-semibold"
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
                     style={{
                       fontSize: 13,
                       color: isActive

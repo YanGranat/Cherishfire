@@ -20,6 +20,7 @@ import {
   waitForPendingNotesWrites,
 } from "../src/application/notes/notes-cache";
 import { createNotesApplication } from "../src/application/notes/notes-application";
+import { createNotesSessionRegistry, type NotesSessionGateway } from "../src/application/notes/notes-session";
 import type { NoteRepository } from "../src/application/notes/note-repository";
 import { parseHabitRouteId } from "../src/domain/habits/route-id";
 import { mergeRecoveredDraft } from "../src/utils/recovered-draft";
@@ -28,6 +29,7 @@ import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-
 import { loadHabitStoreForAudit } from "./fixtures/load-habit-store-for-audit";
 import { loadSqliteRepositoriesForAudit } from "./fixtures/load-sqlite-repositories-for-audit";
 import { auditNoteEditorLifecycle } from "./fixtures/audit-note-editor-lifecycle";
+import { auditUnsavedNotesGuard } from "./fixtures/audit-unsaved-notes-guard";
 interface Deferred<T> {
   readonly promise: Promise<T>;
   resolve(value: T): void;
@@ -245,6 +247,111 @@ function note(id: number, habitId = id): Note {
     createdAt: id,
     updatedAt: id,
   };
+}
+
+async function auditUnclaimedNotesRecovery(): Promise<void> {
+  let failWrite = false;
+  let nextId = 100;
+  const initial = note(1, 1);
+  const gateway: NotesSessionGateway = {
+    getCachedSnapshot: (id) => id === 1 ? [initial] : [],
+    load: async () => ({ notes: [initial], habitExists: true, staleReadCount: 0 }),
+    isLoadResultCurrent: () => true,
+    create: async (record) => {
+      if (failWrite) throw new Error("Write unavailable");
+      return { ...record, id: nextId++ };
+    },
+    update: async () => { if (failWrite) throw new Error("Write unavailable"); },
+    delete: async () => { if (failWrite) throw new Error("Write unavailable"); },
+    trackPendingWrite: (_id, write) => write,
+    waitForPersistenceTurn: async () => true,
+    isWriteProtectedByFence: () => false,
+    waitForCommitOpportunity: async () => {},
+    now: () => new Date("2033-05-04T12:00:00.000Z"),
+  };
+  const registry = createNotesSessionRegistry(gateway);
+  const session = registry.get(1);
+  const generation = session.getSnapshot().generation;
+  failWrite = true;
+  session.update(initial.id, "Failed editor text");
+  await session.whenIdle();
+  const updateRecovery = session.getSnapshot().presentationChanges.at(-1)!;
+  assert.equal(updateRecovery.recoveryText, "Failed editor text");
+  for (let index = 0; index < 70; index++) {
+    session.create(`Independent paragraph ${index}`);
+    await session.whenIdle();
+  }
+  let pending = session.getSnapshot().presentationChanges.filter((change) => change.recoveryText != null);
+  assert.equal(pending.length, 71, "ordinary presentation retention must not discard unclaimed failed text");
+  assert.equal(pending[0].recoveryText, "Failed editor text", "later unrelated creates must preserve an earlier editor recovery");
+  assert.deepEqual(pending.slice(1).map((change) => change.recoveryText),
+    Array.from({ length: 70 }, (_, index) => `Independent paragraph ${index}`),
+    "independent rejected creates must not be coalesced into the latest paragraph");
+  assert.equal(session.getSnapshot().presentationChanges.filter((change) => change.recoveryText == null).length, 64);
+  assert.equal(registry.getResourceCounts().pendingWriteCount, 0, "unclaimed text must not hold an I/O fence open");
+  for (let id = 2; id < 60; id++) registry.get(id);
+  assert.equal(registry.get(1), session, "unclaimed text must survive session LRU pressure after route unmount");
+  const beforeAck = session.getSnapshot();
+  assert.equal(session.acknowledgeRecovery(generation + 1, updateRecovery.sequence), false);
+  assert.equal(session.acknowledgeRecovery(generation, -1), false);
+  assert.equal(session.getSnapshot(), beforeAck, "a stale generation or sequence must not consume recovery");
+  assert.equal(session.acknowledgeRecovery(generation, pending[1].sequence), true);
+  assert.equal(session.acknowledgeRecovery(generation, pending[1].sequence), false);
+  pending = session.getSnapshot().presentationChanges.filter((change) => change.recoveryText != null);
+  assert.equal(pending.length, 70, "an ACK must consume exactly one recovery");
+  assert.equal(pending[0].sequence, updateRecovery.sequence);
+  failWrite = false;
+  session.update(initial.id, "Accepted replacement");
+  await session.whenIdle();
+  assert.equal(session.getSnapshot().presentationChanges.some((change) => change.sequence === updateRecovery.sequence && change.recoveryText != null), false,
+    "a new accepted update must supersede only its own unclaimed editor recovery");
+  assert.equal(session.getSnapshot().presentationChanges.filter((change) => change.recoveryText != null).length, 69,
+    "an accepted update must not discard unrelated rejected creates");
+  failWrite = true;
+  session.update(initial.id, "Rejected before explicit delete");
+  await session.whenIdle();
+  assert.equal(session.getSnapshot().presentationChanges.at(-1)?.recoveryText, "Rejected before explicit delete");
+  failWrite = false;
+  session.delete(initial.id);
+  await session.whenIdle();
+  assert.equal(session.getSnapshot().presentationChanges.some((change) => change.clientMutationId === updateRecovery.clientMutationId && change.recoveryText != null), false,
+    "an accepted delete must supersede recovery for its own removed note");
+  for (const change of session.getSnapshot().presentationChanges) {
+    if (change.recoveryText != null) assert.equal(session.acknowledgeRecovery(generation, change.sequence), true);
+  }
+  assert.ok(session.getSnapshot().presentationChanges.length <= 64, "claimed entries must return to ordinary bounded retention");
+  for (let id = 60; id < 120; id++) registry.get(id);
+  assert.notEqual(registry.get(1), session, "a fully claimed idle session must become evictable again");
+
+  const reasonRegistry = createNotesSessionRegistry({ ...gateway,
+    getCachedSnapshot: () => [{ ...initial, isFailureReason: true, reasonType: "failure" }],
+  });
+  const reason = reasonRegistry.get(1);
+  failWrite = true;
+  reason.update(initial.id, "Failed reason edit");
+  await reason.whenIdle();
+  assert.equal(reason.getSnapshot().presentationChanges.at(-1)?.recoveryText, "Failed reason edit");
+  reasonRegistry.invalidate(1, { kind: "reason-notes-removed", dates: [initial.date] });
+  assert.equal(reason.getSnapshot().presentationChanges.some((change) => change.recoveryText != null), false,
+    "explicit reason cleanup must not retain a recovery for the removed reason");
+  const deleted = reasonRegistry.get(2);
+  deleted.create("Rejected before deletion");
+  await deleted.whenIdle();
+  const oldRecovery = deleted.getSnapshot().presentationChanges.at(-1)!;
+  reasonRegistry.invalidate(2, { kind: "habit-deleted" });
+  assert.equal(deleted.getSnapshot().presentationChanges.length, 0);
+  assert.equal(deleted.acknowledgeRecovery(generation, oldRecovery.sequence), false,
+    "a prior-generation callback must not claim recovery after habit deletion");
+  const missingRegistry = createNotesSessionRegistry({ ...gateway,
+    load: async () => ({ notes: [], habitExists: false, staleReadCount: 0 }),
+  });
+  const missing = missingRegistry.get(3);
+  missing.create("Rejected before missing-habit read");
+  await missing.whenIdle();
+  assert.ok(missing.getSnapshot().presentationChanges.some((change) => change.recoveryText != null));
+  await missing.reload(() => null);
+  assert.equal(missing.getSnapshot().presentationChanges.length, 0,
+    "an authoritative missing-habit read must release obsolete recovery");
 }
 async function main() {
   assert.equal(mergeRecoveredDraft("failed", "", ""), "failed");
@@ -1295,14 +1402,6 @@ async function main() {
     resolve(process.cwd(), "src/domain/habits/route-id.ts"),
     "utf8",
   );
-  const noteInputSource = readFileSync(
-    resolve(process.cwd(), "src/features/notes/components/NoteInput.tsx"),
-    "utf8",
-  );
-  const noteCardSource = readFileSync(
-    resolve(process.cwd(), "src/features/notes/components/NoteCard.tsx"),
-    "utf8",
-  );
   const noteRepositorySource = readFileSync(
     resolve(process.cwd(), "src/data/sqlite/note-repository.ts"),
     "utf8",
@@ -1674,7 +1773,9 @@ async function main() {
     "the composition boundary must delegate the snapshot protocol to the application coordinator",
   );
   await auditExternalNotesWrites();
+  await auditUnclaimedNotesRecovery();
   auditNoteEditorLifecycle();
+  auditUnsavedNotesGuard();
   clearCachedNotes();
   console.log("Notes cache audit passed.");
 }

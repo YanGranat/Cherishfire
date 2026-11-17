@@ -36,8 +36,8 @@
     "everyNDays_few": "Кожні {{count}} дні",
     "everyNDays_many": "Кожні {{count}} днів",
     "everyNDays_other": "Кожні {{count}} дні",
-    "dayOfMonth_one": "{{count}}-е",
-    "dayOfMonth_other": "{{count}}",
+    "dayOfMonth_one": "{{count}}-го",
+    "dayOfMonth_other": "{{count}}-го",
     "fromCompletion": "З моменту виконання",
     "decreaseInterval": "Зменшити інтервал",
     "increaseInterval": "Збільшити інтервал",
@@ -98,7 +98,7 @@
     "maximum": "Максимум",
     "failure": "Невдача",
     "skip": "Пропустити",
-    "archive": "Архів"
+    "archive": "Архівувати"
   },
   "calendarDayMenu": {
     "done": "Готово",
@@ -133,6 +133,9 @@
     "retry": "Повторити"
   },
   "notes": {
+    "discardTitle": "Скасувати зміни?",
+    "discardMessage": "Незбережений текст буде втрачено.",
+    "discard": "Не зберігати",
     "title": "Нотатки",
     "placeholder": "Нова нотатка...",
     "emptyTitle": "Поки немає нотаток",
@@ -188,7 +191,7 @@
   "colorSchemeScreen": {
     "title": "Колірна схема",
     "orange": "Помаранчева",
-    "sunset": "Західна",
+    "sunset": "Захід сонця",
     "amber": "Бурштинова",
     "citron": "Лимонна",
     "pistachio": "Фісташкова",
@@ -254,8 +257,9 @@
     "success": "Дані імпортовано",
     "errorTitle": "Помилка імпорту",
     "errorMessage": "Файл пошкоджений або має некоректний формат.",
+    "actionErrorMessage": "Не вдалося завершити імпорт. Спробуйте ще раз.",
     "previewTitle": "Замінити поточні дані?",
-    "previewMessage": "У файлі: звичок — {{habits}}, в архіві — {{archived}}, відміток — {{records}}, нотаток — {{notes}}. Поточні дані буде замінено.",
+    "previewMessage": "У файлі: звичок — {{habits}} (з них в архіві — {{archived}}), позначок — {{records}}, нотаток — {{notes}}. Поточні дані буде замінено.",
     "replaceData": "Замінити",
     "importing": "Імпорт..."
   },
@@ -289,11 +293,14 @@
     "timeLabel": "Час нагадування",
     "addTime": "Додати час нагадування",
     "removeTime": "Видалити нагадування на {{time}}",
-    "duplicateTime": "Укажіть різний час для кожного нагадування"
+    "duplicateTime": "Укажіть різний час для кожного нагадування",
+    "permissionBlocked": "Сповіщення заборонені в налаштуваннях системи.",
+    "permissionUnavailable": "Налаштування сповіщень недоступні. Спробуйте ще раз.",
+    "openSystemSettings": "Відкрити системні налаштування"
   },
   "accessibility": {
     "openHabit": "Відкрити звичку",
-    "markHabit": "Відмітити звичку «{{name}}»",
+    "markHabit": "Позначити звичку «{{name}}»",
     "reorderItem": "Змінити порядок: {{name}}, позиція {{position}} із {{count}}",
     "itemPosition": "Позиція {{position}} із {{count}}",
     "moveUp": "Перемістити вгору",

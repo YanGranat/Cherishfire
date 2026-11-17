@@ -133,6 +133,9 @@
     "retry": "Opnieuw proberen"
   },
   "notes": {
+    "discardTitle": "Wijzigingen verwerpen?",
+    "discardMessage": "Je niet-opgeslagen tekst gaat verloren.",
+    "discard": "Verwerpen",
     "title": "Notities",
     "placeholder": "Nieuwe notitie...",
     "emptyTitle": "Nog geen notities",
@@ -254,8 +257,9 @@
     "success": "Gegevens geïmporteerd",
     "errorTitle": "Importfout",
     "errorMessage": "Het bestand is beschadigd of heeft een ongeldig formaat.",
+    "actionErrorMessage": "Kan de import niet voltooien. Probeer het opnieuw.",
     "previewTitle": "Huidige gegevens vervangen?",
-    "previewMessage": "Het bestand bevat {{habits}} gewoonten, {{archived}} gearchiveerde, {{records}} registraties en {{notes}} notities. De huidige gegevens worden vervangen.",
+    "previewMessage": "Gewoonten: {{habits}} (waarvan gearchiveerd: {{archived}}). Registraties: {{records}}. Notities: {{notes}}. De huidige gegevens worden vervangen.",
     "replaceData": "Vervangen",
     "importing": "Importeren..."
   },
@@ -289,7 +293,10 @@
     "timeLabel": "Tijd van herinnering",
     "addTime": "Herinneringstijd toevoegen",
     "removeTime": "Verwijder de herinnering van {{time}}",
-    "duplicateTime": "Gebruik voor elke herinnering een andere tijd"
+    "duplicateTime": "Gebruik voor elke herinnering een andere tijd",
+    "permissionBlocked": "Meldingen zijn geblokkeerd in de systeeminstellingen.",
+    "permissionUnavailable": "De meldingsinstellingen zijn niet beschikbaar. Probeer het opnieuw.",
+    "openSystemSettings": "Systeeminstellingen openen"
   },
   "accessibility": {
     "openHabit": "Open gewoonte",

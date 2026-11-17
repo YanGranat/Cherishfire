@@ -10,6 +10,7 @@ import {
 import { auditNoteEditorLifecycle } from "./fixtures/audit-note-editor-lifecycle";
 import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-audit";
 import { assertNoteEditorViewportLayout } from "./audit-note-editor-viewport";
+import { mergeRecoveredDraft } from "../src/utils/recovered-draft";
 
 interface Element {
   type: unknown;
@@ -28,6 +29,7 @@ interface Sources {
   description?: string;
   rename?: string;
   keyboardLayout?: string;
+  noteInput?: string;
 }
 const read = (path: string) => readFileSync(path, "utf8");
 const sourcePaths = {
@@ -57,12 +59,13 @@ function mountComponent(source: string, exportName: string, props: Record<string
   let effects: (() => void)[] = [];
   let accent = "#1276B8";
   let dismissals = 0;
+  const forwardedRef = { current: null as { restoreDraft(recovery: { sequence: number; text: string }): boolean } | null };
   const dependenciesEqual = (left?: unknown[], right?: unknown[]) =>
     left != null && right != null && left.length === right.length &&
     left.every((value, index) => Object.is(value, right[index]));
   const react = {
     memo: (component: unknown) => component,
-    forwardRef: (component: (...args: any[]) => unknown) => (value: unknown) => component(value, null),
+    forwardRef: (component: (...args: any[]) => unknown) => (value: unknown) => component(value, forwardedRef),
     useState(initial: any) {
       const index = cursor++;
       slots[index] ??= { value: typeof initial === "function" ? initial() : initial };
@@ -120,7 +123,7 @@ function mountComponent(source: string, exportName: string, props: Record<string
       DESCRIPTION_LINES_MIN: 1, DESCRIPTION_LINES_MAX: 8,
       clampDescriptionVisibleLines: (value: number) => Math.max(1, Math.min(8, Math.round(value))),
     },
-    "@/utils/recovered-draft": { mergeRecoveredDraft: (value: string) => value },
+    "@/utils/recovered-draft": { mergeRecoveredDraft },
     "@/components/ui/Dialog": { Dialog: "Dialog" },
     "@/hooks/useRetainedModalSession": { useRetainedModalSession: () => ({ session: null }) },
     "@/theme/tokens": { sizes: { sendButton: 36 } },
@@ -154,6 +157,7 @@ function mountComponent(source: string, exportName: string, props: Record<string
     dialog: () => { const dialog = find(tree, (element) => element.type === "Dialog"); assert.ok(dialog); return dialog; },
     setAccent: (value: string) => { accent = value; render(); },
     dismissals: () => dismissals,
+    handle: () => forwardedRef.current,
     unmount: () => { for (const slot of slots) slot.cleanup?.(); },
   };
 }
@@ -522,14 +526,36 @@ export function auditNotesVisibility(overrides: Sources = {}): void {
   assert.equal(rename.input().props.selectionColor, "#6B45A8");
   assert.equal(rename.input().props.cursorColor, "#6B45A8");
   rename.unmount();
-  const composer = mountComponent(read("src/features/notes/components/NoteInput.tsx"), "NoteInput", { onSend: () => true, keyboardVisible: false, extraKeyboardLift: 0 });
+  const composer = mountComponent(overrides.noteInput ?? read("src/features/notes/components/NoteInput.tsx"), "NoteInput", { onSend: () => true, hidden: true, keyboardVisible: false, extraKeyboardLift: 0 });
   assert.equal(composer.input().props.selectionColor, "#1276B8");
   assert.equal(composer.input().props.cursorColor, "#1276B8");
+  const send = find(composer.render(), (element) => element.type === "Pressable" && element.props.accessibilityLabel === "notes.send");
+  assert.ok(send);
+  assert.ok(send.props.style.width + 2 * send.props.hitSlop >= 44);
+  assert.ok(send.props.style.height + 2 * send.props.hitSlop >= 44);
+  let composerFocuses = 0;
+  composer.input().props.ref.current = { focus: () => { composerFocuses++; } };
+  assert.equal(composer.handle()!.restoreDraft({ sequence: 1, text: "Unclaimed composer paragraph" }), false,
+    "hidden composer recovery must refuse delivery without consuming its sequence");
+  assert.equal(composerFocuses, 0, "hidden composer recovery must never steal native focus");
+  composer.props.hidden = false; composer.render();
+  assert.equal(composer.input().props.value, "");
+  assert.equal(composer.handle()!.restoreDraft({ sequence: 1, text: "Unclaimed composer paragraph" }), true);
+  composer.render();
+  assert.equal(composer.input().props.value, "Unclaimed composer paragraph");
+  assert.equal(composerFocuses, 1);
+  assert.equal(composer.handle()!.restoreDraft({ sequence: 1, text: "Unclaimed composer paragraph" }), true);
+  composer.render();
+  assert.equal(composer.input().props.value, "Unclaimed composer paragraph", "a repeated claimed composer recovery must not append duplicate text");
+  assert.equal(composerFocuses, 1, "a repeated recovery must not refocus the composer");
   composer.unmount();
   auditNoteEditorLifecycle({ noteCard: overrides.noteCard, route });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   auditNotesVisibility();
+  const noteInput = read("src/features/notes/components/NoteInput.tsx");
+  assert.ok(noteInput.includes("hitSlop={3}"));
+  assert.throws(() => auditNotesVisibility({ noteInput: noteInput.replace("hitSlop={3}", "hitSlop={0}") }), { name: "AssertionError" });
   console.log("Notes visibility and editing audit passed.");
 }

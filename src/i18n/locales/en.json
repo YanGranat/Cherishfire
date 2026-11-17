@@ -135,6 +135,9 @@
     "retry": "Try again"
   },
   "notes": {
+    "discardTitle": "Discard changes?",
+    "discardMessage": "Your unsaved text will be lost.",
+    "discard": "Discard",
     "title": "Notes",
     "placeholder": "New note...",
     "emptyTitle": "No notes yet",
@@ -175,8 +178,8 @@
     "theme": "Theme",
     "colorScheme": "Color scheme",
     "language": "Language",
-    "askFailureReason": "Ask failure reason",
-    "askSkipReason": "Ask skip reason",
+    "askFailureReason": "Ask for a failure reason",
+    "askSkipReason": "Ask for a skip reason",
     "sound": "Sound",
     "reminders": "Reminders",
     "showArchivedHabitsInStatistics": "Include archived habits in statistics"
@@ -256,8 +259,9 @@
     "success": "Data imported",
     "errorTitle": "Import error",
     "errorMessage": "File is corrupted or has an invalid format.",
+    "actionErrorMessage": "Could not complete the import. Try again.",
     "previewTitle": "Replace current data?",
-    "previewMessage": "The file contains {{habits}} habits, {{archived}} archived, {{records}} check-ins, and {{notes}} notes. Current data will be replaced.",
+    "previewMessage": "Habits: {{habits}} (including {{archived}} archived); check-ins: {{records}}; notes: {{notes}}. Current data will be replaced.",
     "replaceData": "Replace",
     "importing": "Importing..."
   },
@@ -291,7 +295,10 @@
     "timeLabel": "Reminder time",
     "addTime": "Add reminder time",
     "removeTime": "Remove the {{time}} reminder",
-    "duplicateTime": "Use a different time for each reminder"
+    "duplicateTime": "Use a different time for each reminder",
+    "permissionBlocked": "Notifications are blocked in your system settings.",
+    "permissionUnavailable": "Notification settings are unavailable. Try again.",
+    "openSystemSettings": "Open system settings"
   },
   "accessibility": {
     "openHabit": "Open habit",

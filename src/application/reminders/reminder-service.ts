@@ -1145,8 +1145,8 @@ class ReminderApplicationService implements ReminderService {
     }
 
     if (this.dependencies.notifications.pendingReminderLimit != null) {
-      // On iOS one completed/skipped/failed day changes the global 64-slot
-      // competition. Rebuild all habits so the newly freed slot is filled by
+      // One completed/skipped/failed day changes global slot competition.
+      // Rebuild all habits so the newly freed slot is filled by
       // the next chronological candidate, not just by the touched habit.
       await this.syncHabitRemindersNow(habitsSnapshot, {
         force: true,
