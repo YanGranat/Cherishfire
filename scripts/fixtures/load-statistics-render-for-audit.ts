@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import Module from "node:module";
 import { dirname, resolve } from "node:path";
 import ts from "typescript";
+import { getAdjacentReorder } from "../../src/utils/accessibility-reorder";
 
 type DependencyList = readonly unknown[] | undefined;
 
@@ -329,6 +330,7 @@ function createScreenMocks(
       },
     ],
     ["@/stores/settings-store", { useSettingsStore }],
+    ["@/utils/accessibility-reorder", { getAdjacentReorder }],
     [
       "@/components/ScreenPreferencesBoundary",
       {

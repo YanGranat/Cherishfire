@@ -48,6 +48,18 @@ interface DatePickerModalProps {
   onCancel: () => void;
 }
 type DatePickerContentProps = Omit<DatePickerModalProps, "visible">;
+const MONTH_NAVIGATION_TARGET_STYLE = {
+  width: 44,
+  height: 44,
+  margin: -10,
+  alignItems: "center",
+  justifyContent: "center",
+} as const;
+const DATE_ACTION_TEXT_STYLE = {
+  fontSize: 14,
+  lineHeight: 20,
+  fontWeight: "600",
+} as const;
 interface DatePickerSelectionDraft {
   getPickedDate: () => string;
   pickedDate: string;
@@ -255,12 +267,16 @@ const DatePickerCalendarPane = React.memo(function DatePickerCalendarPane({
   }, []);
   return (
     <>
-      <View className="flex-row items-center justify-between px-base py-sm">
+      <View
+        className="flex-row items-center justify-between px-base"
+        style={{ paddingVertical: 10, marginVertical: -2 }}
+      >
         <Pressable
           onPress={showPreviousMonth}
           accessibilityRole="button"
           accessibilityLabel={previousMonthLabel}
           className="active:opacity-60"
+          style={MONTH_NAVIGATION_TARGET_STYLE}
         >
           <MaterialIcons name="chevron-left" size={24} color={paletteIcon} />
         </Pressable>
@@ -270,6 +286,7 @@ const DatePickerCalendarPane = React.memo(function DatePickerCalendarPane({
           accessibilityRole="button"
           accessibilityLabel={nextMonthLabel}
           className="active:opacity-60"
+          style={MONTH_NAVIGATION_TARGET_STYLE}
         >
           <MaterialIcons name="chevron-right" size={24} color={paletteIcon} />
         </Pressable>
@@ -359,7 +376,7 @@ function DatePickerContent({
                 }}
                 className="px-md py-sm active:opacity-60"
               >
-                <Text className="text-muted text-sm font-semibold">
+                <Text className="text-muted" style={DATE_ACTION_TEXT_STYLE}>
                   {t("datePicker.cancel")}
                 </Text>
               </Pressable>
@@ -370,7 +387,7 @@ function DatePickerContent({
                 className="px-md py-sm active:opacity-60"
               >
                 <Text
-                  style={{ color: accent, fontSize: 14, fontWeight: "600" }}
+                  style={[DATE_ACTION_TEXT_STYLE, { color: accent }]}
                 >
                   {t("datePicker.ok")}
                 </Text>

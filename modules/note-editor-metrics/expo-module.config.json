@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["NoteEditorMetricsModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.noteeditormetrics.NoteEditorMetricsModule"]
+  }
+}

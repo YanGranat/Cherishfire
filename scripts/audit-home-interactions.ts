@@ -21,6 +21,12 @@ import { subDays } from "date-fns/subDays";
 import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-audit";
 import { loadHabitStoreForAudit } from "./fixtures/load-habit-store-for-audit";
 import { auditReasonDialogCancellation } from "./fixtures/audit-reason-dialog-cancellation";
+import {
+  getAdjacentReorder, getReorderActions, getReorderDirection,
+} from "../src/utils/accessibility-reorder";
+import {
+  haveSameIdSet, isSameOrder, mergeReorderedSubsetIntoOrder,
+} from "../src/features/habits/utils/order";
 
 import { MAIN_CALENDAR_FUTURE_DAYS } from "../src/features/habits/constants";
 
@@ -1361,22 +1367,18 @@ function auditCompletedOwnerDisposal(source: string): void {
 }
 function auditHomeReorder(source: string): void {
   const persisted: number[][] = [];
+  let currentOrder = [1, 2, 3];
   const callback = loadSourceCallableForAudit<(ids: number[]) => void>(
     source,
     "handleReorderActiveIds",
     {
       activeHabitIds: [1, 2],
       habitOrderIds: [1, 2, 3],
-      haveSameIdSet: (a: number[], b: number[]) =>
-        a.length === b.length && a.every((id) => b.includes(id)),
-      mergeReorderedSubsetIntoOrder: (_full: number[], subset: number[]) => [
-        ...subset,
-        3,
-      ],
-      isSameOrder: (a: number[], b: number[]) =>
-        a.length === b.length && a.every((id, i) => id === b[i]),
+      useHabitStore: { getState: () => ({ habits: currentOrder.map((id) => ({ id })) }) },
+      haveSameIdSet, mergeReorderedSubsetIntoOrder, isSameOrder,
       reorderHabits: async (ids: number[]) => {
         persisted.push([...ids]);
+        currentOrder = [...ids];
       },
     },
   );
@@ -1387,9 +1389,14 @@ function auditHomeReorder(source: string): void {
     "accepted order command must run exactly once",
   );
   callback([1, 2]);
+  assert.deepEqual(persisted[1], [1, 2, 3], "a rapid reversal must compare with the current store order");
+  callback([1, 2]);
   callback([1, 4]);
   callback([-1, 2]);
-  assert.equal(persisted.length, 1);
+  assert.equal(persisted.length, 2);
+  currentOrder = [1, 3];
+  callback([2, 1]);
+  assert.equal(persisted.length, 2, "a captured active subset must not reinsert a deleted habit");
 }
 function auditHomeTodayStripWiring(source: string): void {
   const calls: string[] = [],
@@ -1990,6 +1997,8 @@ function auditReasonCommandDate(source: string): void {
       useRef: (initial: unknown) => ({ current: initial }),
       useTranslation: () => ({ t: (key: string) => key }),
       useVisualEffectiveMode: () => "light",
+      useVisualColorScheme: () => "orange",
+      getAccentScheme: () => ({ base: "#FF5A2A" }),
       Dialog: "dialog", TextInput: "input",
     },
   );
@@ -2223,7 +2232,265 @@ function auditUniqueOrderMembership(source: string): void {
   }
 }
 
+function auditAccessibleHabitReorder(source: string): void {
+  const calls: number[][] = [];
+  const base = {
+    admitOwnerCallback: () => true, isBusy: false,
+    suppressLayoutAnimations: false, suppressReflowAnimation: false,
+    pendingDropOrderRef: { current: null },
+    isDragging: { value: false }, itemIdsRef: { current: [19, 37, 61] },
+    getAdjacentReorder, haveSameIdSet,
+    handleDropCommit: (from: number, to: number) => calls.push([from, to]),
+  };
+  const load = (changes: Record<string, unknown> = {}) => loadSourceCallableForAudit<
+    (id: number, direction: "up" | "down") => void
+  >(source, "handleAccessibilityMove", { ...base, ...changes });
+  const move = load();
+  move(19, "up"); move(61, "down"); move(99, "up");
+  assert.deepEqual(calls, []);
+  move(37, "up"); move(37, "down");
+  assert.deepEqual(calls, [[1, 0], [1, 2]],
+    "accessible moves must use the existing active-list drop owner");
+  for (const changes of [
+    { admitOwnerCallback: () => false }, { isBusy: true },
+    { suppressLayoutAnimations: true }, { suppressReflowAnimation: true },
+    { pendingDropOrderRef: { current: [37, 19] } },
+    { isDragging: { value: true } }, { itemIdsRef: { current: [19, -7, 61] } },
+  ]) {
+    load(changes)(37, "down");
+    assert.equal(calls.length, 2, "a busy, disposed or provisional habit list must reject accessible moves");
+  }
+}
+function auditHabitReorderControls(source: string): void {
+  const moved: unknown[] = [];
+  const common = {
+    useTranslation: () => ({ t: (key: string, values?: Record<string, unknown>) =>
+      values ? `${key}:${values.name ?? ""}:${values.position}:${values.count}` : key }),
+    useRef: (value: unknown) => ({ current: value }),
+    useLayoutEffect: () => undefined,
+    Pressable: "pressable", View: "view", Text: "text", CheckboxCircle: "checkbox",
+    DragHandle: "drag-handle", getReorderActions, getReorderDirection,
+    Platform: { OS: "android" },
+  };
+  const render = loadTsxCallable<(props: Record<string, unknown>) => AuditElement>(
+    source, "HabitItemComponent", common,
+  );
+  const props = {
+    habitId: 37, habitName: "Read a page", checkboxState: "unmarked", currentStreak: 0,
+    showDragHandle: true, reorderIndex: 1, reorderCount: 3,
+    onAccessibilityMove: (id: number, direction: string) => moved.push([id, direction]),
+  };
+  const row = render(props);
+  assert.equal(row.props.accessibilityLabel, "Read a page");
+  assert.equal(row.props.accessibilityValue.text, "accessibility.itemPosition::2:3");
+  assert.deepEqual(JSON.parse(JSON.stringify(row.props.accessibilityActions)), [
+    { name: "moveUp", label: "accessibility.moveUp" },
+    { name: "moveDown", label: "accessibility.moveDown" },
+  ]);
+  row.props.onAccessibilityAction({ nativeEvent: { actionName: "moveDown" } });
+  assert.deepEqual(moved, [[37, "down"]]);
+  const handle = row.props.children.at(-1) as AuditElement;
+  assert.equal(handle.props.accessibilityLabel, "accessibility.reorderItem:Read a page:2:3");
+  const renderHandle = loadTsxCallable<(props: unknown) => AuditElement>(source, "DragHandle", {
+    Pressable: "pressable", Icon: "icon", GestureDetector: "detector",
+    sizes: { headerIconTouch: 44, headerIcon: 24 }, getReorderDirection,
+  });
+  const target = renderHandle(handle.props);
+  assert.equal(target.props.accessibilityRole, "adjustable");
+  target.props.onAccessibilityAction({ nativeEvent: { actionName: "decrement" } });
+  assert.deepEqual(moved, [[37, "down"], [37, "up"]]);
+  render({ ...props, reorderDisabled: true }).props.onAccessibilityAction({ nativeEvent: { actionName: "moveUp" } });
+  render({ ...props, habitId: -3 }).props.onAccessibilityAction({ nativeEvent: { actionName: "moveUp" } });
+  render({ ...props, reorderCount: 1, reorderIndex: 0 }).props.onAccessibilityAction({ nativeEvent: { actionName: "moveUp" } });
+  assert.equal(moved.length, 2, "blocked and provisional rows cannot move through accessibility");
+  const same = loadSourceCallableForAudit<(a: unknown, b: unknown) => boolean>(source, "areHabitItemPropsEqual", {});
+  for (const changed of [{ reorderIndex: 0 }, { reorderCount: 4 }, { reorderDisabled: true }, { onAccessibilityMove: () => undefined }]) {
+    assert.equal(same(props, { ...props, ...changed }), false,
+      "memoized rows must publish changed accessible order state");
+  }
+}
+
+function auditLocalizedHabitReorderControls(source: string): void {
+  for (const locale of ["de", "en", "es", "fr", "it", "nl", "pl", "ru", "uk"]) {
+    const dictionary = JSON.parse(read(`src/i18n/locales/${locale}.json`)).accessibility;
+    const labels = { up: dictionary.moveUp, down: dictionary.moveDown };
+    assert.notEqual(labels.up, labels.down);
+    for (const platform of ["android", "ios"]) {
+      const moved: unknown[] = [], opened: number[] = [];
+      const render = loadTsxCallable<(props: unknown) => AuditElement>(source, "HabitItemComponent", {
+        useTranslation: () => ({ t: (key: string) => dictionary[key.split(".").at(-1)!] ?? key }),
+        useRef: (value: unknown) => ({ current: value }), useLayoutEffect: () => undefined,
+        Pressable: "pressable", View: "view", Text: "text", CheckboxCircle: "checkbox",
+        DragHandle: "drag-handle", getReorderActions, getReorderDirection,
+        Platform: { OS: platform },
+      });
+      const row = render({
+        habitId: 37, habitName: "Read a page", checkboxState: "unmarked", currentStreak: 0,
+        showDragHandle: true, reorderIndex: 1, reorderCount: 3,
+        dragHandleGesture: "native-gesture",
+        onPress: (id: number) => opened.push(id),
+        onAccessibilityMove: (id: number, direction: string) => moved.push([id, direction]),
+      });
+      const handleProps = row.props.children.at(-1).props;
+      const renderHandle = loadTsxCallable<(props: unknown) => AuditElement>(source, "DragHandle", {
+        Pressable: "pressable", Icon: "icon", GestureDetector: "detector",
+        sizes: { headerIconTouch: 44, headerIcon: 24 }, getReorderDirection,
+      });
+      const handle = renderHandle(handleProps).props.children as AuditElement;
+      for (const [target, adjustable] of [[row, false], [handle, true]] as const) {
+        const expectedNames = platform === "ios" ? [labels.up, labels.down]
+          : adjustable ? ["decrement", "increment"] : ["moveUp", "moveDown"];
+        assert.deepEqual(Array.from(target.props.accessibilityActions, (action: any) => action.name), expectedNames,
+          "native custom action names must preserve localized iOS labels and stable Android IDs");
+        for (const [index, direction] of ["up", "down"].entries()) {
+          const before = moved.length;
+          target.props.onAccessibilityAction({ nativeEvent: { actionName: expectedNames[index] } });
+          assert.equal(moved.length, before + 1, "a localized action must dispatch exactly once");
+          assert.deepEqual(moved.at(-1), [37, direction]);
+        }
+        for (const actionName of ["activate", "unrecognized-reorder-action"]) {
+          const before = moved.length;
+          target.props.onAccessibilityAction({ nativeEvent: { actionName } });
+          assert.equal(moved.length, before, "primary activation and unknown actions must not become reorder commands");
+        }
+      }
+      for (const [actionName, direction] of [["increment", "down"], ["decrement", "up"]]) {
+        const before = moved.length;
+        handle.props.onAccessibilityAction({ nativeEvent: { actionName } });
+        assert.equal(moved.length, before + 1);
+        assert.deepEqual(moved.at(-1), [37, direction]);
+      }
+      row.props.onPress();
+      assert.deepEqual(opened, [37], "normal primary activation must still open the habit once");
+    }
+  }
+}
+
+function createAccessibleHomeOrderHarness(
+  listSource: string,
+  screenSource: string,
+  readOrder: () => number[],
+  writeOrder: (ids: number[]) => unknown,
+) {
+  const initialActiveIds = [19, 37, 61];
+  const itemIdsRef = { current: initialActiveIds.slice() };
+  const pendingDropOrderRef = { current: null as number[] | null };
+  const timers: (() => void)[] = [];
+  let live = true;
+  const admitOwnerCallback = () => live;
+  const commitFullOrder = loadSourceCallableForAudit<(ids: number[]) => void>(
+    screenSource, "handleReorderActiveIds", {
+      activeHabitIds: initialActiveIds,
+      habitOrderIds: readOrder().slice(),
+      useHabitStore: { getState: () => ({ habits: readOrder().map((id) => ({ id })) }) },
+      haveSameIdSet, mergeReorderedSubsetIntoOrder, isSameOrder,
+      reorderHabits: writeOrder,
+    },
+  );
+  const finalizeDrop = loadSourceCallableForAudit<() => void>(listSource, "finalizeDrop", {
+    pendingDropOrderRef, clearFinalizeTimeout: () => undefined,
+    resetDragState: () => undefined, clearSessionRaf: () => undefined,
+    clearSessionRafRef: { current: null }, requestAnimationFrame: () => 1,
+    setDragSessionIndexById: () => undefined,
+  });
+  const commit = loadSourceCallableForAudit<(from: number, to: number, ids?: number[]) => void>(
+    listSource, "handleDropCommit", {
+      admitOwnerCallback, itemIdsRef, pendingDropOrderRef,
+      clearFinalizeTimeout: () => undefined, finalizeTimeoutRef: { current: null },
+      setTimeout: (callback: () => void) => timers.push(callback), finalizeDrop,
+      onReorderRef: { current: commitFullOrder },
+    },
+  );
+  const move = loadSourceCallableForAudit<(id: number, direction: "up" | "down") => void>(
+    listSource, "handleAccessibilityMove", {
+      admitOwnerCallback, isBusy: false, suppressLayoutAnimations: false,
+      suppressReflowAnimation: false, isDragging: { value: false },
+      itemIdsRef, pendingDropOrderRef, getAdjacentReorder, haveSameIdSet,
+      handleDropCommit: commit,
+    },
+  );
+  return {
+    move, pendingDropOrderRef, itemIdsRef, timers,
+    dispose: () => { live = false; },
+    acknowledge: (visibleIds: number[]) => loadArrowContaining<() => void>(
+      listSource, "const expected = pendingDropOrderRef.current;", {
+        pendingDropOrderRef, visibleIds, finalizeDrop,
+      },
+    )(),
+  };
+}
+
+function auditRapidAccessibleHomeOrders(listSource: string, screenSource = homeSource): void {
+  let previous: { callback: unknown; dependencies: unknown[] } | undefined;
+  const environment = {
+    useCallback: (callback: unknown, dependencies: unknown[]) => {
+      if (previous && dependencies.length === previous.dependencies.length &&
+        dependencies.every((value, index) => Object.is(value, previous!.dependencies[index]))) {
+        return previous.callback;
+      }
+      previous = { callback, dependencies };
+      return callback;
+    },
+    admitOwnerCallback: () => true, handleDropCommit: () => undefined,
+    isBusy: false, isDragging: { value: false },
+    suppressLayoutAnimations: false, suppressReflowAnimation: false,
+    dragSessionIndexById: null as null | Record<number, number>,
+  };
+  const beforeDrag = evaluateInitializer(listSource, "handleAccessibilityMove", environment);
+  environment.dragSessionIndexById = { 19: 0, 37: 1, 61: 2 };
+  const duringDrag = evaluateInitializer(listSource, "handleAccessibilityMove", environment);
+  assert.equal(duringDrag, beforeDrag,
+    "starting a drag must not replace every accessible row callback");
+  const sameRow = loadSourceCallableForAudit<(a: unknown, b: unknown) => boolean>(
+    listSource, "areActiveHabitRowPropsEqual", {},
+  );
+  const row = {
+    item: { habit: { id: 37, name: "Read a page" }, checkboxState: "unmarked", currentStreak: 0 },
+    index: 1, totalCount: 3, reorderIndex: 1, dragSessionIndex: 1,
+    onAccessibilityMove: beforeDrag,
+  };
+  assert.equal(sameRow(row, { ...row, onAccessibilityMove: duringDrag }), true,
+    "stable accessibility props must preserve the normal drag row memoization");
+  let fullOrder = [19, 83, 37, 61];
+  const accepted: number[][] = [];
+  const harness = createAccessibleHomeOrderHarness(listSource, screenSource,
+    () => fullOrder,
+    (ids) => { fullOrder = [...ids]; accepted.push([...ids]); },
+  );
+  harness.move(61, "up");
+  assert.deepEqual(fullOrder, [19, 83, 61, 37]);
+  const firstOrder = [19, 61, 37];
+  harness.move(61, "up");
+  assert.deepEqual(fullOrder, [61, 83, 19, 37],
+    "successive accessible commands must use the latest accepted order before a render");
+  const newestPending = harness.pendingDropOrderRef.current;
+  harness.acknowledge(firstOrder);
+  assert.equal(harness.pendingDropOrderRef.current, newestPending,
+    "an older order acknowledgement must not clear a newer pending order");
+  harness.timers[0]();
+  assert.equal(harness.pendingDropOrderRef.current, newestPending,
+    "a queued older timeout must not clear a newer pending order");
+  harness.move(61, "down");
+  harness.move(61, "down");
+  assert.deepEqual(fullOrder, [19, 83, 37, 61],
+    "rapid reversals must return to the original order through the current store owner");
+  assert.equal(accepted.length, 4);
+  harness.itemIdsRef.current = [19, 37, 61];
+  harness.acknowledge([19, 37, 61]);
+  assert.equal(harness.pendingDropOrderRef.current, null);
+  harness.move(37, "up");
+  assert.deepEqual(fullOrder, [37, 83, 19, 61],
+    "an acknowledged list must admit the next accessible command");
+  harness.dispose();
+  harness.move(37, "down");
+  assert.equal(accepted.length, 5, "a disposed date owner must reject later accessible commands");
+}
+
 const audits = [
+  () => auditAccessibleHabitReorder(activeListSource),
+  () => auditRapidAccessibleHomeOrders(activeListSource),
+  () => auditHabitReorderControls(itemSource),
+  () => auditLocalizedHabitReorderControls(itemSource),
   () => auditContextAdmission(homeSource),
   () => auditCheckboxCommandFeedback(checkboxSource),
   () => auditUniqueOrderMembership(read("src/features/habits/utils/order.ts")),
@@ -2291,6 +2558,66 @@ const mutationCases: [
   (s: string) => void,
   RegExp,
 ][] = [
+  [
+    "accessible-ios-action-name", itemSource,
+    "getReorderActions(reorderIndex, reorderCount, reorderLabels, false, Platform.OS)",
+    "getReorderActions(reorderIndex, reorderCount, reorderLabels, false)",
+    auditLocalizedHabitReorderControls, /localized iOS labels/,
+  ],
+  [
+    "accessible-ios-row-dispatch", itemSource,
+    /getReorderDirection\(event\.nativeEvent\.actionName, reorderLabels\);\r?\n        if \(canReorder/,
+    "getReorderDirection(event.nativeEvent.actionName);\n        if (canReorder",
+    auditLocalizedHabitReorderControls, /localized action must dispatch exactly once/,
+  ],
+  [
+    "accessible-ios-handle-dispatch", itemSource,
+    /getReorderDirection\(event\.nativeEvent\.actionName, reorderLabels\);\r?\n        if \(direction\)/,
+    "getReorderDirection(event.nativeEvent.actionName);\n        if (direction)",
+    auditLocalizedHabitReorderControls, /localized action must dispatch exactly once/,
+  ],
+  [
+    "accessible-order-pending-base", activeListSource,
+    "pendingDropOrderRef.current ?? itemIdsRef.current", "itemIdsRef.current",
+    auditRapidAccessibleHomeOrders, /successive accessible commands/,
+  ],
+  [
+    "accessible-order-drag-identity", activeListSource,
+    "admitOwnerCallback, handleDropCommit, isBusy, isDragging,",
+    "dragSessionIndexById, admitOwnerCallback, handleDropCommit, isBusy, isDragging,",
+    auditRapidAccessibleHomeOrders, /starting a drag/,
+  ],
+  [
+    "accessible-order-drop-base", activeListSource,
+    "const ids = orderIds.slice();", "const ids = itemIdsRef.current.slice();",
+    auditRapidAccessibleHomeOrders, /successive accessible commands/,
+  ],
+  [
+    "accessible-order-current-store", homeSource,
+    "const currentOrderIds = useHabitStore.getState().habits.map((habit) => habit.id);",
+    "const currentOrderIds = habitOrderIds;",
+    (source) => auditRapidAccessibleHomeOrders(activeListSource, source), /rapid reversals/,
+  ],
+  [
+    "accessible-order-late-ack", activeListSource,
+    "if (expected[i] !== visibleIds[i]) return;", "if (false) return;",
+    auditRapidAccessibleHomeOrders, /older order acknowledgement/,
+  ],
+  [
+    "accessible-order-late-timeout", activeListSource,
+    "if (pendingDropOrderRef.current === ids) finalizeDrop();", "finalizeDrop();",
+    auditRapidAccessibleHomeOrders, /queued older timeout/,
+  ],
+  [
+    "accessible-reorder-admission", activeListSource,
+    "!admitOwnerCallback() || isBusy || suppressLayoutAnimations ||",
+    "false ||", auditAccessibleHabitReorder, /busy, disposed or provisional/,
+  ],
+  [
+    "accessible-reorder-memo", itemSource,
+    "previous.reorderIndex === next.reorderIndex &&", "true &&",
+    auditHabitReorderControls, /publish changed accessible order state/,
+  ],
   [
     "reason-date-publication",
     homeSource,
@@ -2590,6 +2917,58 @@ for (const [name, source, before, after, audit, message] of mutationCases) {
   );
   mutations++;
 }
+async function auditAccessibleOrderPersistence(): Promise<void> {
+  const originalOrder = [19, 83, 37, 61];
+  const habits = originalOrder.map((id, displayOrder) => ({
+    id, name: `Habit ${id}`, description: null, descriptionVisible: false,
+    repeatSchedule: { type: "daily" as const }, startDate: format(new Date(), "yyyy-MM-dd"),
+    reminderEnabled: false, reminderTime: null, displayOrder,
+    isArchived: false, archivedAt: null, archiveHistory: [], createdAt: 1, updatedAt: 1,
+  }));
+  let releaseWrites!: () => void;
+  const writeGate = new Promise<void>((resolve) => { releaseWrites = resolve; });
+  const loaded = loadHabitStoreForAudit({ habits, records: [] }, {
+    waitForCommitOpportunity: () => writeGate,
+  });
+  const store = loaded.storeModule.useHabitStore;
+  await store.getState().loadHabits();
+  const writes: Promise<void>[] = [];
+  const persisted: number[][] = [];
+  loaded.persistence.application.persistReorder = async (ids) => {
+    persisted.push([...ids]);
+    return ids.map((id, displayOrder) => ({ id, displayOrder }));
+  };
+  const readOrder = () => store.getState().habits.map((habit) => habit.id);
+  const harness = createAccessibleHomeOrderHarness(activeListSource, homeSource, readOrder, (ids) => {
+    const write = store.getState().reorderHabits(ids);
+    writes.push(write);
+    return write;
+  });
+  try {
+    harness.move(61, "up");
+    harness.move(61, "up");
+    assert.deepEqual(readOrder(), [61, 83, 19, 37],
+      "actual store must publish both accepted moves before persistence");
+    harness.acknowledge([19, 61, 37]);
+    assert.notEqual(harness.pendingDropOrderRef.current, null);
+    harness.move(61, "down");
+    harness.move(61, "down");
+    assert.deepEqual(readOrder(), originalOrder,
+      "actual store must accept reversal to the pre-render order");
+    harness.acknowledge([19, 37, 61]);
+    assert.equal(harness.pendingDropOrderRef.current, null);
+    assert.deepEqual(persisted, [], "durable writes must still be held by the existing commit scheduler");
+    harness.dispose();
+  } finally {
+    releaseWrites();
+    await Promise.all(writes);
+  }
+  assert.deepEqual(persisted, [originalOrder],
+    "the existing persistence owner must commit the latest order after UI acknowledgement");
+  assert.deepEqual(readOrder(), originalOrder,
+    "older write completions must not replace the latest optimistic order");
+}
+
 async function auditFutureReasonStoreRefusal(removeFutureGuard = false): Promise<void> {
   const today = format(new Date(), "yyyy-MM-dd");
   const futureDate = format(addDays(new Date(), 1), "yyyy-MM-dd");
@@ -2618,11 +2997,12 @@ const auditDeadline = setTimeout(() => {
 void (async () => {
   await auditReasonDialogCancellation(loadTsxCallable);
   await auditFutureReasonStoreRefusal();
+  await auditAccessibleOrderPersistence();
   await assert.rejects(() => auditFutureReasonStoreRefusal(true), {
     name: "AssertionError", message: /actual store must refuse/,
   });
   console.log(
-    "Home interactions audit passed: " + (audits.length + 1) +
+    "Home interactions audit passed: " + (audits.length + 2) +
       " product groups, 6 height-seed mutants and " + (mutations - 6 + 1) +
       " interaction mutants.",
   );

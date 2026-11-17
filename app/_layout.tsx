@@ -26,9 +26,10 @@ import {
 import { retryFailedSettingsPlatformEffects } from "@/composition/settings";
 import { darkTheme, lightTheme } from "@/theme/colors";
 import {
-  refreshSystemColorMode,
-  useSystemColorMode,
-} from "@/theme/system-appearance";
+  applyNativeColorPreference,
+  refreshNativeColorMode,
+  useNativeColorMode,
+} from "@/theme/native-appearance";
 import { useUIStore } from "@/stores/ui-store";
 import { setAndroidNavigationBarTheme } from "@/utils/system-navigation-bar";
 import { runWhenUiIsIdle } from "@/utils/ui-scheduling";
@@ -40,12 +41,15 @@ import {
 
 function AppChromeBoundary({ children }: { children: React.ReactNode }) {
   const theme = useSettingsStore((state) => state.theme);
-  const systemColorScheme = useSystemColorMode();
+  const systemColorScheme = useNativeColorMode();
   const isDarkTheme =
     theme === "dark" || (theme === "system" && systemColorScheme === "dark");
   const stackBackgroundColor = isDarkTheme
     ? darkTheme.background
     : lightTheme.background;
+  useLayoutEffect(() => {
+    applyNativeColorPreference(theme);
+  }, [theme]);
   useLayoutEffect(() => {
     setAndroidNavigationBarTheme(isDarkTheme);
   }, [isDarkTheme]);
@@ -109,7 +113,7 @@ function AppContent() {
     });
     const subscription = AppState.addEventListener("change", (state) => {
       if (state === "active") {
-        refreshSystemColorMode();
+        refreshNativeColorMode();
         retryFailedSettingsPlatformEffects();
         void refreshReminderNotificationTimezone().catch(() => {
           // Uncertain native state is retried once on the next foreground transition.
@@ -143,7 +147,7 @@ function StartupState({
   errorMessage?: string;
   onRetry?: () => void;
 }) {
-  const systemColorScheme = useSystemColorMode();
+  const systemColorScheme = useNativeColorMode();
   const isSystemDark = systemColorScheme === "dark";
   const palette = isSystemDark ? darkTheme : lightTheme;
   useLayoutEffect(() => {

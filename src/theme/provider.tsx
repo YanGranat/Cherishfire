@@ -3,7 +3,7 @@ import React, { useMemo } from "react";
 import { StyleSheet, View } from "react-native";
 import { vars } from "nativewind";
 import { getThemeVars } from "./colors";
-import type { EffectiveColorMode } from "@/theme/system-appearance";
+import type { EffectiveColorMode } from "@/theme/native-appearance";
 
 interface ThemeProviderProps {
   effectiveMode: EffectiveColorMode;

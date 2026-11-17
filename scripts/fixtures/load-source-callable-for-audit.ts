@@ -7,6 +7,7 @@ export function loadSourceCallableForAudit<T>(
   source: string,
   name: string,
   environment: Record<string, unknown>,
+  jsx = false,
 ): T {
   const tree = ts.createSourceFile("component.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let callableText: string | undefined;
@@ -17,6 +18,14 @@ export function loadSourceCallableForAudit<T>(
       } else if (ts.isCallExpression(node.initializer)) {
         callableText = node.initializer.arguments[0]?.getText(tree);
       }
+    } else if (ts.isMethodDeclaration(node) && node.name.getText(tree) === name && node.body) {
+      const modifiers = node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword)
+        ? [ts.factory.createModifier(ts.SyntaxKind.AsyncKeyword)] : undefined;
+      const expression = ts.factory.createFunctionExpression(
+        modifiers, node.asteriskToken, undefined, node.typeParameters,
+        node.parameters, node.type, node.body,
+      );
+      callableText = ts.createPrinter().printNode(ts.EmitHint.Expression, expression, tree);
     } else if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
       const declaration = ts.factory.updateFunctionDeclaration(
         node,
@@ -30,7 +39,12 @@ export function loadSourceCallableForAudit<T>(
   visit(tree);
   assert.ok(callableText, `${name} must exist in the current source`);
   const code = ts.transpileModule(`(${callableText})`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+    fileName: jsx ? "component.tsx" : "component.ts",
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.CommonJS,
+      ...(jsx ? { jsx: ts.JsxEmit.ReactJSX } : {}),
+    },
   }).outputText;
   return runInNewContext(code, environment) as T;
 }

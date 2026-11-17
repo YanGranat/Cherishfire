@@ -294,13 +294,15 @@
   "accessibility": {
     "openHabit": "Gewohnheit öffnen",
     "markHabit": "Gewohnheit {{name}} markieren",
-    "reorderHabit": "Gewohnheit neu anordnen",
+    "reorderItem": "{{name}} neu anordnen, Position {{position}} von {{count}}",
+    "itemPosition": "Position {{position}} von {{count}}",
+    "moveUp": "Nach oben verschieben",
+    "moveDown": "Nach unten verschieben",
     "openStatistics": "Statistik öffnen",
     "showCalendar": "Kalender anzeigen",
     "hideCalendar": "Kalender ausblenden",
     "moreOptions": "Weitere Aktionen",
     "openNotes": "Notizen öffnen",
-    "reorderStatisticsBlock": "Statistikblock neu anordnen",
     "habitStatus": {
       "unmarked": "Nicht markiert",
       "unmarkedPast": "In der Vergangenheit nicht markiert",

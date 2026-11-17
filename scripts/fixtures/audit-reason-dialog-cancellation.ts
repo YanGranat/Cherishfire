@@ -46,6 +46,10 @@ async function auditDialog(load: Loader, source: string): Promise<void> {
   const renderSurface = load<(props: Record<string, unknown>) => Element>(
     read("src/components/ui/Dialog.tsx"), "Dialog", {
       useWindowDimensions: () => ({ width: 393, height: 800 }),
+      useRef: (value: unknown) => ({ current: value }),
+      useState: (value: unknown) => [value, () => {}],
+      useEffect: () => {}, useLayoutEffect: () => {},
+      getDialogViewportHeight: (height: number) => height,
       useVisualColorScheme: () => "orange",
       useVisualEffectiveMode: () => "dark",
       getAccentScheme: () => ({ base: "#FF5A2A" }),
@@ -64,6 +68,7 @@ async function auditDialog(load: Loader, source: string): Promise<void> {
           ...hooks.environment,
           useTranslation: () => ({ t: (key: string) => key }),
           useVisualEffectiveMode: () => theme,
+          useVisualColorScheme: () => "orange", getAccentScheme: () => ({ base: "#FF5A2A" }),
           Dialog: "dialog", TextInput: "input",
         });
         const props = { visible: true, status, initialReason: "Unsaved reason", onDismiss: () => {},
@@ -76,7 +81,7 @@ async function auditDialog(load: Loader, source: string): Promise<void> {
         const surface = renderSurface(dialog.props);
         const scrim = surface.props.children;
         let stopped = false;
-        scrim.props.children.props.onPress({ stopPropagation: () => { stopped = true; } });
+        scrim.props.children.props.children.props.onPress({ stopPropagation: () => { stopped = true; } });
         assert.equal(stopped, true, "pressing inside the card must not cancel the dialog");
         assert.equal(cancels, 0);
         if (gesture === "button") dialog.props.actions[0].onPress();
@@ -98,6 +103,7 @@ async function auditDialog(load: Loader, source: string): Promise<void> {
     const render = load<(props: Record<string, unknown>) => Element>(source, "FailureReasonDialogSession", {
       ...hooks.environment, useTranslation: () => ({ t: (key: string) => key }),
       useVisualEffectiveMode: () => "dark", Dialog: "dialog", TextInput: "input",
+      useVisualColorScheme: () => "orange", getAccentScheme: () => ({ base: "#FF5A2A" }),
       console: { error: () => {} },
     });
     const props = { visible: true, status: "failure", initialReason, onDismiss: () => {},

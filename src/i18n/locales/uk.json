@@ -294,13 +294,15 @@
   "accessibility": {
     "openHabit": "Відкрити звичку",
     "markHabit": "Відмітити звичку «{{name}}»",
-    "reorderHabit": "Змінити порядок звички",
+    "reorderItem": "Змінити порядок: {{name}}, позиція {{position}} із {{count}}",
+    "itemPosition": "Позиція {{position}} із {{count}}",
+    "moveUp": "Перемістити вгору",
+    "moveDown": "Перемістити вниз",
     "openStatistics": "Відкрити статистику",
     "showCalendar": "Показати календар",
     "hideCalendar": "Сховати календар",
     "moreOptions": "Додаткові дії",
     "openNotes": "Відкрити нотатки",
-    "reorderStatisticsBlock": "Змінити порядок блоку статистики",
     "habitStatus": {
       "unmarked": "Не позначено",
       "unmarkedPast": "Не позначено в минулому",

@@ -4,9 +4,9 @@ import { getSceneI18n } from "@/i18n/scene-instance";
 import { useSettingsStore } from "@/stores/settings-store";
 import { ThemeProvider } from "@/theme/provider";
 import {
-  useSystemColorMode,
+  useNativeColorMode,
   type EffectiveColorMode,
-} from "@/theme/system-appearance";
+} from "@/theme/native-appearance";
 import {
   DEFAULT_SETTINGS,
   type ColorScheme,
@@ -22,8 +22,8 @@ function useLiveVisualPreferences(): VisualPreferencesSnapshot {
   const theme = useSettingsStore((state) => state.theme);
   const colorScheme = useSettingsStore((state) => state.colorScheme);
   const language = useSettingsStore((state) => state.language);
-  const systemMode = useSystemColorMode();
-  const effectiveMode = theme === "system" ? systemMode : theme;
+  const nativeMode = useNativeColorMode();
+  const effectiveMode = theme === "system" ? nativeMode : theme;
   return React.useMemo(
     () => ({ theme, effectiveMode, colorScheme, language }),
     [colorScheme, effectiveMode, language, theme],

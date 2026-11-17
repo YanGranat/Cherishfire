@@ -1,6 +1,7 @@
 import React from "react";
 import {
   View,
+  Platform,
   useWindowDimensions,
   type LayoutChangeEvent,
 } from "react-native";
@@ -49,6 +50,11 @@ import {
 import type { StatisticsBlockId } from "@/types/settings";
 import { useVisualEffectiveMode } from "@/components/ScreenPreferencesBoundary";
 import { darkTheme, lightTheme } from "@/theme/colors";
+import {
+  getReorderActions,
+  getReorderDirection,
+  type ReorderDirection,
+} from "@/utils/accessibility-reorder";
 type StatsBlockId = StatisticsBlockId;
 interface ReorderableStatisticsBlocksProps {
   visibleOrder: StatsBlockId[];
@@ -59,6 +65,7 @@ interface ReorderableStatisticsBlocksProps {
   active?: boolean;
   onSceneReady?: () => void;
   onReorder: (visibleOrder: StatsBlockId[]) => void;
+  onMoveBlock: (id: StatsBlockId, direction: ReorderDirection) => void;
 }
 interface ReorderableStatisticsSceneProps
   extends Omit<
@@ -69,7 +76,6 @@ interface ReorderableStatisticsSceneProps
   bottomPadding: number;
   initialScrollOffset: number;
   preservedScrollOffset: SharedValue<number>;
-  reorderAccessibilityLabel: string;
   onScrollSettled: (offset: number) => void;
 }
 interface ReorderableStatisticsRowProps {
@@ -79,6 +85,9 @@ interface ReorderableStatisticsRowProps {
   controllerMounted: boolean;
   handleColor: string;
   reorderAccessibilityLabel: string;
+  reorderIndex: number;
+  reorderCount: number;
+  onAccessibilityMove: (id: StatsBlockId, direction: ReorderDirection) => void;
   scrollRef: AnimatedRef<React.ComponentRef<typeof Animated.ScrollView>>;
   baseOrder: SharedValue<number[]>;
   committedOrder: SharedValue<number[]>;
@@ -122,6 +131,9 @@ type StatisticsDragControllerProps = Pick<
   | "code"
   | "enabled"
   | "reorderAccessibilityLabel"
+  | "reorderIndex"
+  | "reorderCount"
+  | "onAccessibilityMove"
   | "scrollRef"
   | "committedOrder"
   | "sessionOrder"
@@ -199,6 +211,9 @@ const StatisticsDragController = React.memo(function StatisticsDragController({
   code,
   enabled,
   reorderAccessibilityLabel,
+  reorderIndex,
+  reorderCount,
+  onAccessibilityMove,
   scrollRef,
   committedOrder,
   sessionOrder,
@@ -224,6 +239,11 @@ const StatisticsDragController = React.memo(function StatisticsDragController({
   onDrop,
   onScrollSettled,
 }: StatisticsDragControllerProps) {
+  const { t } = useTranslation();
+  const reorderLabels = {
+    up: t("accessibility.moveUp"),
+    down: t("accessibility.moveDown"),
+  };
   const isDropping = useSharedValue(false);
   const dragStartedAtEpochMs = useSharedValue(0);
   const acceptDrop = React.useCallback(
@@ -419,6 +439,13 @@ const StatisticsDragController = React.memo(function StatisticsDragController({
         accessible={enabled}
         accessibilityRole="adjustable"
         accessibilityLabel={reorderAccessibilityLabel}
+        accessibilityActions={enabled
+          ? getReorderActions(reorderIndex, reorderCount, reorderLabels, true, Platform.OS)
+          : []}
+        onAccessibilityAction={(event) => {
+          const direction = getReorderDirection(event.nativeEvent.actionName, reorderLabels);
+          if (enabled && direction) onAccessibilityMove(id, direction);
+        }}
         pointerEvents={enabled ? "auto" : "none"}
         importantForAccessibility={enabled ? "auto" : "no-hide-descendants"}
         style={styles.handle}
@@ -433,6 +460,9 @@ const ReorderableStatisticsRow = React.memo(function ReorderableStatisticsRow({
   controllerMounted,
   handleColor,
   reorderAccessibilityLabel,
+  reorderIndex,
+  reorderCount,
+  onAccessibilityMove,
   scrollRef,
   baseOrder,
   committedOrder,
@@ -549,6 +579,9 @@ const ReorderableStatisticsRow = React.memo(function ReorderableStatisticsRow({
           code={code}
           enabled={enabled}
           reorderAccessibilityLabel={reorderAccessibilityLabel}
+          reorderIndex={reorderIndex}
+          reorderCount={reorderCount}
+          onAccessibilityMove={onAccessibilityMove}
           scrollRef={scrollRef}
           committedOrder={committedOrder}
           sessionOrder={sessionOrder}
@@ -727,12 +760,13 @@ const ReorderableStatisticsScene = React.memo(
     active,
     bottomPadding,
     onReorder,
+    onMoveBlock,
     initialScrollOffset,
     preservedScrollOffset,
-    reorderAccessibilityLabel,
     onScrollSettled,
     onSceneReady,
   }: ReorderableStatisticsSceneProps) {
+    const { t } = useTranslation();
     const effectiveMode = useVisualEffectiveMode();
     const backgroundColor =
       effectiveMode === "dark" ? darkTheme.background : lightTheme.background;
@@ -1767,6 +1801,25 @@ const ReorderableStatisticsScene = React.memo(
       },
       [],
     );
+    const handleAccessibilityMove = React.useCallback(
+      (id: StatsBlockId, direction: ReorderDirection) => {
+        if (
+          sceneInteractionAdmissionRef.current !== sceneInteractionAdmissionToken ||
+          !sceneInteractive || !layoutReady ||
+          activeDropOwnerRef.current != null || draggingCode.value >= 0 ||
+          settling.value !== 0
+        ) return;
+        onMoveBlock(id, direction);
+      },
+      [draggingCode, layoutReady, onMoveBlock,
+        sceneInteractionAdmissionToken, sceneInteractive, settling],
+    );
+    const blockLabels: Record<StatsBlockId, string> = {
+      summary: `${t("statistics.progress")}, ${t("statistics.perfectDays")}`,
+      heatmap: t("statistics.activity"),
+      bar: t("statistics.completionRate"),
+      habit: t("statistics.byHabit"),
+    };
     const handleDragStart = React.useCallback(
       (id: StatsBlockId, observedAtEpochMs: number) => {
         activeDropOwnerRef.current = {
@@ -1869,7 +1922,14 @@ const ReorderableStatisticsScene = React.memo(
                   enabled={layoutReady && sceneInteractive}
                   controllerMounted={controllerShouldBeMounted}
                   handleColor={handleColor}
-                  reorderAccessibilityLabel={reorderAccessibilityLabel}
+                  reorderAccessibilityLabel={t("accessibility.reorderItem", {
+                    name: blockLabels[id],
+                    position: visibleOrder.indexOf(id) + 1,
+                    count: visibleOrder.length,
+                  })}
+                  reorderIndex={visibleOrder.indexOf(id)}
+                  reorderCount={visibleOrder.length}
+                  onAccessibilityMove={handleAccessibilityMove}
                   scrollRef={scrollRef}
                   baseOrder={baseOrder}
                   committedOrder={committedOrder}
@@ -1937,11 +1997,9 @@ export function ReorderableStatisticsBlocks(
   props: ReorderableStatisticsBlocksProps,
 ) {
   const active = props.active ?? true;
-  const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const { width, height, fontScale } = useWindowDimensions();
   const bottomPadding = insets.bottom + 16;
-  const reorderAccessibilityLabel = t("accessibility.reorderStatisticsBlock");
   // A pure reorder and every later content presentation reuse one native scene.
   // The revision starts an in-place geometry handoff without changing React
   // keys, keeping the ScrollView, rows and gesture controllers mounted.
@@ -1974,9 +2032,9 @@ export function ReorderableStatisticsBlocks(
         active={active}
         bottomPadding={bottomPadding}
         onReorder={props.onReorder}
+        onMoveBlock={props.onMoveBlock}
         initialScrollOffset={settledScrollOffsetRef.current}
         preservedScrollOffset={preservedScrollOffset}
-        reorderAccessibilityLabel={reorderAccessibilityLabel}
         onScrollSettled={handleScrollSettled}
         onSceneReady={props.onSceneReady}
       />

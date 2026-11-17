@@ -10,6 +10,10 @@ expo-env.d.ts
 # Native builds
 /ios/
 /android/
+/modules/*/android/build/
+/modules/*/android/.cxx/
+/modules/*/android/.gradle/
+/modules/*/ios/build/
 *.jks
 *.p8
 *.p12

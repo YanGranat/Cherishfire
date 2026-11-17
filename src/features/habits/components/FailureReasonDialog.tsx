@@ -3,7 +3,8 @@ import React, { useRef, useState } from "react";
 import { TextInput } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Dialog } from "@/components/ui/Dialog";
-import { useVisualEffectiveMode } from "@/components/ScreenPreferencesBoundary";
+import { useVisualColorScheme, useVisualEffectiveMode } from "@/components/ScreenPreferencesBoundary";
+import { getAccentScheme } from "@/theme/colors";
 import { useRetainedModalSession } from "@/hooks/useRetainedModalSession";
 type FailureReasonStatus = "failure" | "skipped";
 interface FailureReasonDialogProps {
@@ -34,6 +35,7 @@ function FailureReasonDialogSession({
   const isSubmittingRef = useRef(false);
   const { t } = useTranslation();
   const effectiveMode = useVisualEffectiveMode();
+  const accent = getAccentScheme(useVisualColorScheme()).base;
   const isDarkTheme = effectiveMode === "dark";
   const submit = async (action: () => boolean | Promise<boolean>) => {
     if (isSubmittingRef.current) {
@@ -97,6 +99,8 @@ function FailureReasonDialogSession({
       ]}
     >
       <TextInput
+        cursorColor={accent}
+        selectionColor={accent}
         value={reason}
         onChange={(event) => handleReasonChange(event.nativeEvent.text)}
         editable={!isSubmitting}

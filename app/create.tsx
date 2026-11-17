@@ -444,14 +444,15 @@ export default function CreateHabitScreen() {
           onPress={handleBack}
           accessibilityRole="button"
           accessibilityLabel={t("common.back")}
-          className="items-center justify-center w-11 h-11"
+          className="items-center justify-center w-11 h-11 shrink-0"
         >
           <MaterialIcons name="arrow-back" size={24} color={palette.icon} />
         </Pressable>
         <Text
           className="text-primary font-semibold"
-          style={{ fontSize: 18 }}
+          style={{ fontSize: 18, flexShrink: 1, minWidth: 0, textAlign: "center" }}
           numberOfLines={1}
+          ellipsizeMode="tail"
         >
           {t("creation.title")}
         </Text>
@@ -460,7 +461,7 @@ export default function CreateHabitScreen() {
           accessibilityRole="button"
           accessibilityLabel={t("creation.save")}
           accessibilityState={{ disabled: !canSave }}
-          className="items-center justify-center px-sm h-11"
+          className="items-center justify-center px-sm h-11 shrink-0"
           disabled={!canSave}
         >
           <Text
@@ -515,6 +516,8 @@ export default function CreateHabitScreen() {
                 width: "100%",
               }}
               placeholderTextColor={palette.muted}
+              cursorColor={accent}
+              selectionColor={accent}
             />
           </View>
         </View>
@@ -559,6 +562,8 @@ export default function CreateHabitScreen() {
                 width: "100%",
               }}
               placeholderTextColor={palette.muted}
+              cursorColor={accent}
+              selectionColor={accent}
               textAlignVertical="top"
             />
           </View>

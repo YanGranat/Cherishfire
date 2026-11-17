@@ -161,6 +161,21 @@ function run(): void {
           assert.equal(getRepeatLabel({ type: "monthly", dates: [day] }, instance.getFixedT(localeCode), [], localeCode), expected,
             `${file} must render a correct monthly date without depending on Intl.PluralRules`);
         }
+        for (const [dates, expected] of [
+          [Array.from({ length: 31 }, (_, index) => index + 1), "1–31"],
+          [[4, 5, 6, 12, 22, 23, 24, 25], "4–6, 12, 22–25"],
+          [[5, 6, 18], "5, 6, 18"],
+          [[4, 8, 12, 18], "4, 8, 12, 18"],
+          [[30, 29, 28, 13, 8, 7], "7, 8, 13, 28–30"],
+        ] as const) {
+          const draft = [...dates];
+          assert.equal(
+            getRepeatLabel({ type: "monthly", dates: draft }, instance.getFixedT(localeCode), [], localeCode),
+            expected,
+            `${file} must compact date runs without hiding gaps or pairs`,
+          );
+          assert.deepEqual(draft, dates, "formatting must not mutate the selected dates");
+        }
       } finally {
         Reflect.set(Intl, "PluralRules", originalPluralRules);
       }

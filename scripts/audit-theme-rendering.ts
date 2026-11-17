@@ -325,8 +325,16 @@ function auditGroupedSurfaceColors(): void {
     const { ArchiveCard } = loadSource<{
       ArchiveCard(props: Record<string, unknown>): Element;
     }>("src/features/archive/components/ArchiveCard.tsx", {
-      react: { ...react, memo: (component: unknown) => component },
-      "react-native": { View: "View", Text: "Text", Pressable: "Pressable" },
+      react: {
+        ...react,
+        memo: (component: unknown) => component,
+        useRef: (initial: unknown) => ({ current: initial }),
+        useState: (initial: unknown) => [initial, () => undefined],
+      },
+      "react-native": {
+        View: "View", Text: "Text", Pressable: "Pressable",
+        useWindowDimensions: () => ({ fontScale: 1 }),
+      },
       "react-i18next": { useTranslation: () => ({ t: (key: string) => key }) },
       "@expo/vector-icons/MaterialIcons": "MaterialIcons",
       "@/components/ScreenPreferencesBoundary": {
@@ -967,6 +975,7 @@ function auditCompositeStylingBoundaries(
       ts.ScriptKind.TSX,
     );
     let opening: ts.JsxOpeningElement | ts.JsxSelfClosingElement | undefined;
+    let noteViewport: ts.JsxOpeningElement | undefined;
     let background: ts.VariableStatement | undefined;
     const find = (node: ts.Node): void => {
       if (
@@ -974,6 +983,8 @@ function auditCompositeStylingBoundaries(
         node.tagName.getText(tree) === component
       )
         opening = node;
+      if (file.includes("notes") && ts.isJsxOpeningElement(node) &&
+          node.tagName.getText(tree) === "NoteEditorViewport") noteViewport = node;
       if (
         ts.isVariableStatement(node) &&
         node.declarationList.declarations.some(
@@ -1014,6 +1025,17 @@ function auditCompositeStylingBoundaries(
         return ${style.expression!.getText(tree)};
       }`,
     );
+    let extractedNoteViewport: { style(lift: number): Record<string, unknown> } | undefined;
+    if (file.includes("notes")) {
+      assert.ok(noteViewport, "Notes must preserve its dedicated editor viewport");
+      const viewportStyle = noteViewport.attributes.properties.find((property): property is ts.JsxAttribute =>
+        ts.isJsxAttribute(property) && property.name.getText(tree) === "style")?.initializer;
+      assert.ok(viewportStyle && ts.isJsxExpression(viewportStyle) && viewportStyle.expression);
+      extractedNoteViewport = loadSource(file, {}, () => `
+        export function style(editorKeyboardLift: number) {
+          return ${viewportStyle.expression!.getText(tree)};
+        }`);
+    }
     for (mode of ["light", "dark"] as const)
       for (const lift of [0, 168]) {
         const nativeStyle = extracted.style(lift);
@@ -1026,7 +1048,6 @@ function auditCompositeStylingBoundaries(
                   flex: 1,
                   backgroundColor: (mode === "dark" ? darkTheme : lightTheme)
                     .background,
-                  paddingBottom: lift,
                 }
               : { flex: 1, backgroundColor: settingsScreenBackgrounds[mode] },
         );
@@ -1035,6 +1056,21 @@ function auditCompositeStylingBoundaries(
         assert.equal(element.props.style, nativeStyle);
         assert.ok(!("cssInterop" in element.props));
         assert.ok(!opaqueStyles.has(nativeStyle));
+        if (file.includes("notes")) {
+          const viewportStyle = extractedNoteViewport!.style(lift);
+          assert.deepEqual(viewportStyle, { flex: 1, paddingBottom: lift, overflow: "hidden" },
+            "the Notes viewport, not its screen root, must own the editor keyboard lift");
+          assert.equal("backgroundColor" in viewportStyle, false,
+            "the Notes viewport must remain transparent instead of owning another background");
+          assert.equal(nativeStyle.backgroundColor,
+            (mode === "dark" ? darkTheme : lightTheme).background,
+            "the transparent Notes viewport must preserve its current root canvas in both themes");
+          const nativeViewport = Symbol("NoteEditorViewport");
+          const viewportElement = bridge(nativeViewport, { style: viewportStyle });
+          assert.equal(viewportElement.type, nativeViewport);
+          assert.equal(viewportElement.props.style, viewportStyle);
+          assert.ok(!opaqueStyles.has(viewportStyle));
+        }
       }
   }
 }

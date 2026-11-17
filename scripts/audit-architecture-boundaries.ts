@@ -9,7 +9,7 @@ const SYSTEM_APPEARANCE_OWNER = path.join(
   ROOT,
   "src",
   "theme",
-  "system-appearance.ts",
+  "native-appearance.ts",
 );
 const SETTINGS_STORE_OWNER = path.join(
   ROOT,

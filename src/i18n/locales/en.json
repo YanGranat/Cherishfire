@@ -296,13 +296,15 @@
   "accessibility": {
     "openHabit": "Open habit",
     "markHabit": "Mark habit {{name}}",
-    "reorderHabit": "Reorder habit",
+    "reorderItem": "Reorder {{name}}, item {{position}} of {{count}}",
+    "itemPosition": "Item {{position}} of {{count}}",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
     "openStatistics": "Open statistics",
     "showCalendar": "Show calendar",
     "hideCalendar": "Hide calendar",
     "moreOptions": "More actions",
     "openNotes": "Open notes",
-    "reorderStatisticsBlock": "Reorder statistics block",
     "habitStatus": {
       "unmarked": "Not marked",
       "unmarkedPast": "Not marked in the past",

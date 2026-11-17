@@ -294,13 +294,15 @@
   "accessibility": {
     "openHabit": "Open gewoonte",
     "markHabit": "Markeer gewoonte {{name}}",
-    "reorderHabit": "Gewoonte verplaatsen",
+    "reorderItem": "{{name}} verplaatsen, positie {{position}} van {{count}}",
+    "itemPosition": "Positie {{position}} van {{count}}",
+    "moveUp": "Omhoog verplaatsen",
+    "moveDown": "Omlaag verplaatsen",
     "openStatistics": "Open statistieken",
     "showCalendar": "Kalender tonen",
     "hideCalendar": "Kalender verbergen",
     "moreOptions": "Meer acties",
     "openNotes": "Notities openen",
-    "reorderStatisticsBlock": "Statistiekblok verplaatsen",
     "habitStatus": {
       "unmarked": "Niet gemarkeerd",
       "unmarkedPast": "Niet gemarkeerd in het verleden",

@@ -100,6 +100,8 @@ export function RepeatIntervalTab({
           onChange={(event) => handleTextChange(event.nativeEvent.text)}
           onBlur={handleTextBlur}
           keyboardType="number-pad"
+          cursorColor={accent}
+          selectionColor={accent}
           accessibilityLabel={t("repeat.intervalValue")}
           className="text-primary text-center"
           style={{ fontSize: 28, fontWeight: "700", width: 80 }}

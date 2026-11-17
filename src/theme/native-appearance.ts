@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Appearance, type ColorSchemeName } from "react-native";
+import type { ThemeMode } from "@/types/settings";
 
 export type EffectiveColorMode = "light" | "dark";
 
@@ -28,7 +29,7 @@ function ensureAppearanceSubscription(): void {
   });
 }
 
-export function subscribeSystemColorMode(listener: () => void): () => void {
+export function subscribeNativeColorMode(listener: () => void): () => void {
   listeners.add(listener);
   ensureAppearanceSubscription();
   return () => {
@@ -39,7 +40,7 @@ export function subscribeSystemColorMode(listener: () => void): () => void {
   };
 }
 
-export function getSystemColorMode(): EffectiveColorMode {
+export function getNativeColorMode(): EffectiveColorMode {
   // Refresh the initial module snapshot before the first subscriber mounts.
   // This also covers a system theme change while the process was suspended.
   if (listeners.size === 0) {
@@ -49,14 +50,20 @@ export function getSystemColorMode(): EffectiveColorMode {
 }
 
 /** Re-checks the native value after process resume in case no event was delivered. */
-export function refreshSystemColorMode(): void {
+export function refreshNativeColorMode(): void {
   publishColorMode(normalizeColorScheme(Appearance.getColorScheme()));
 }
 
-export function useSystemColorMode(): EffectiveColorMode {
+/** Native controls share the app preference; null releases the override. */
+export function applyNativeColorPreference(theme: ThemeMode): void {
+  if (typeof Appearance.setColorScheme !== "function") return;
+  Appearance.setColorScheme(theme === "system" ? null : theme);
+}
+
+export function useNativeColorMode(): EffectiveColorMode {
   return React.useSyncExternalStore(
-    subscribeSystemColorMode,
-    getSystemColorMode,
-    getSystemColorMode,
+    subscribeNativeColorMode,
+    getNativeColorMode,
+    getNativeColorMode,
   );
 }

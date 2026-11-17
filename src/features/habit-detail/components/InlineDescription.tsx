@@ -10,8 +10,8 @@ import React, {
 import { View, Text, TextInput, Keyboard, PanResponder } from "react-native";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import { useTranslation } from "react-i18next";
-import { useVisualEffectiveMode } from "@/components/ScreenPreferencesBoundary";
-import { lightTheme } from "@/theme/colors";
+import { useVisualColorScheme, useVisualEffectiveMode } from "@/components/ScreenPreferencesBoundary";
+import { getAccentScheme, lightTheme } from "@/theme/colors";
 import {
   persistDescriptionVisibleLines,
   readPersistedDescriptionVisibleLines,
@@ -41,6 +41,7 @@ const INPUT_HORIZONTAL_PADDING = 12;
 const MIN_VISIBLE_LINES = DESCRIPTION_LINES_MIN;
 const MAX_VISIBLE_LINES = DESCRIPTION_LINES_MAX;
 const INPUT_MIN_HEIGHT = 44;
+const PREVIEW_SELECTION = { start: 0, end: 0 };
 function clampVisibleLines(lines: number): number {
   return clampDescriptionVisibleLines(lines);
 }
@@ -71,6 +72,7 @@ export const InlineDescription = React.memo(function InlineDescription({
 }: InlineDescriptionProps) {
   const { t } = useTranslation();
   const effectiveMode = useVisualEffectiveMode();
+  const accent = getAccentScheme(useVisualColorScheme()).base;
   const isDark = effectiveMode === "dark";
   const cardBackgroundColor = isDark ? "#262626" : lightTheme.surfaceElevated;
   const cardBorderColor = isDark ? "#5F5F5F" : lightTheme.border;
@@ -86,6 +88,7 @@ export const InlineDescription = React.memo(function InlineDescription({
   }
   const initialVisibleLines = initialVisibleLinesRef.current;
   const [editing, setEditing] = useState(false);
+  const [previewSelectionActive, setPreviewSelectionActive] = useState(true);
   const [text, setText] = useState(description ?? "");
   const [, setVisibleLines] = useState(initialVisibleLines);
   const [inputHeight, setInputHeight] = useState(
@@ -126,6 +129,7 @@ export const InlineDescription = React.memo(function InlineDescription({
     );
     textRef.current = nextText;
     setText(nextText);
+    setPreviewSelectionActive(false);
     setEditing(true);
     onEditingChange?.(true);
     if (recoveryFocusFrameRef.current != null) {
@@ -166,6 +170,7 @@ export const InlineDescription = React.memo(function InlineDescription({
   }, [description, editable, onEditingChange, onSave, text]);
   const handleInputFocus = () => {
     if (!editable || editing) return;
+    setPreviewSelectionActive(false);
     draftBaseTextRef.current = textRef.current;
     setEditing(true);
     onEditingChange?.(true);
@@ -236,6 +241,10 @@ export const InlineDescription = React.memo(function InlineDescription({
     () => heightToLines(inputHeight),
     [inputHeight],
   );
+  const previewBottomPadding = INPUT_VERTICAL_PADDING + Math.max(
+    0,
+    inputHeight - (liveVisibleLines * INPUT_LINE_HEIGHT + INPUT_VERTICAL_PADDING * 2),
+  );
   useEffect(() => {
     if (!registerSaveHandler) return;
     if (!visible) {
@@ -287,6 +296,9 @@ export const InlineDescription = React.memo(function InlineDescription({
           <TextInput
             ref={descriptionInputRef}
             value={text}
+            selection={previewSelectionActive && !editing ? PREVIEW_SELECTION : undefined}
+            selectionColor={accent}
+            cursorColor={accent}
             onChange={(event) => handleTextChange(event.nativeEvent.text)}
             editable={editable}
             multiline
@@ -301,7 +313,7 @@ export const InlineDescription = React.memo(function InlineDescription({
               backgroundColor: controlBackgroundColor,
               paddingHorizontal: INPUT_HORIZONTAL_PADDING,
               paddingTop: INPUT_VERTICAL_PADDING,
-              paddingBottom: INPUT_VERTICAL_PADDING,
+              paddingBottom: editing ? INPUT_VERTICAL_PADDING : previewBottomPadding,
               lineHeight: INPUT_LINE_HEIGHT,
               borderColor: controlBorderColor,
               borderWidth: 0.5,

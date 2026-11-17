@@ -58,7 +58,23 @@ export function getRepeatLabel(
           count,
         });
       }
-      return [...schedule.dates].sort((a, b) => a - b).join(", ");
+      const dates = [...schedule.dates].sort((a, b) => a - b);
+      const labels: string[] = [];
+      for (let start = 0; start < dates.length; ) {
+        let end = start;
+        while (end + 1 < dates.length && dates[end + 1] === dates[end] + 1) {
+          end += 1;
+        }
+        if (end - start >= 2) {
+          labels.push(`${dates[start]}–${dates[end]}`);
+        } else {
+          for (let index = start; index <= end; index += 1) {
+            labels.push(String(dates[index]));
+          }
+        }
+        start = end + 1;
+      }
+      return labels.join(", ");
     }
 
     case "interval":

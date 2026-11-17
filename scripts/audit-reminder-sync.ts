@@ -435,7 +435,7 @@ function createReminderServiceHarness(options?: {
   });
   let configureCount = 0;
   let configureFailuresRemaining = options?.configureFailures ?? 0;
-  let timezoneSignature = "Europe/Kyiv:fixed";
+  let timezoneSignature = "clock-zone:initial";
   let nextNativeIdentifier = 1;
   let now = new Date(2026, 7, 29, 7, 30, 0, 0);
   let authoritativeHabits: Habit[] = [reminderHabit];
@@ -1132,7 +1132,7 @@ async function auditReminderServiceBehavior(): Promise<void> {
   timezone.service.scheduleHabitRemindersSync([reminderHabit]);
   await runDeferredReminderServiceWork(timezone.service);
   const configureCountBeforeRefresh = timezone.configureCount;
-  timezone.setTimezoneSignature("Europe/Kyiv:changed-offset");
+  timezone.setTimezoneSignature("clock-zone:changed");
   await timezone.service.refreshReminderNotificationTimezone();
   assert.ok(
     timezone.configureCount > configureCountBeforeRefresh,

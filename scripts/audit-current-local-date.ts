@@ -226,7 +226,7 @@ function auditReminderDateSubscription(): void {
       refreshes += 1;
       return Promise.resolve();
     },
-    refreshSystemColorMode: () => {},
+    refreshNativeColorMode: () => {},
     retryFailedSettingsPlatformEffects: () => {},
     startPendingReminderWorkBeforeBackground: () => { backgroundDrains += 1; },
   }) as () => () => void;

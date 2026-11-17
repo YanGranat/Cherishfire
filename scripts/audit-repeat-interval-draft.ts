@@ -237,6 +237,8 @@ function auditComponentLifetime(source: string): void {
   };
   const initial = render("2", true);
   const input = find(initial, (element) => element.type === "TextInput")!;
+  assert.equal(input.props.cursorColor, "#123456");
+  assert.equal(input.props.selectionColor, "#123456");
   const increase = find(
     initial,
     (element) => element.props.accessibilityLabel === "repeat.increaseInterval",

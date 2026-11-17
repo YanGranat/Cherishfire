@@ -1,6 +1,6 @@
 {
   "name": "cherishfire",
-  "version": "1.5.118",
+  "version": "1.5.122",
   "description": "Local-first Expo habit tracker with multi-state completion, notes, reminders, and rich statistics.",
   "main": "expo-router/entry",
   "license": "MIT",
@@ -65,7 +65,7 @@
     "audit:stats-reorder": "tsx scripts/audit-statistics-reorder.ts",
     "audit:reminders": "tsx scripts/audit-reminder-sync.ts",
     "audit:bundle-size": "tsx scripts/audit-bundle-size.ts",
-    "audit:safety": "tsx scripts/audit-ux-safety.ts",
+    "audit:safety": "tsx scripts/audit-ux-safety.ts && tsx scripts/audit-ui-forms.ts && tsx scripts/audit-notes-visibility.ts && tsx scripts/audit-note-editor-metrics.ts && tsx scripts/audit-note-caret-visibility.ts && tsx scripts/audit-note-editor-viewport.ts && tsx scripts/audit-ui-dialogs.ts",
     "db:generate": "drizzle-kit generate",
     "db:check": "drizzle-kit check",
     "db:studio": "drizzle-kit studio",

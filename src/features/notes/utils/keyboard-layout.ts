@@ -4,12 +4,13 @@ interface NoteKeyboardLayoutParams {
   keyboardOverlap: number;
   bottomInset: number;
   nativeLayoutOwner: boolean;
+  measuredRootBottom?: number | null;
+  keyboardTop?: number | null;
 }
 
 interface ReportedKeyboardOverlapParams {
   eventHeight: number;
   overlapFromScreenY: number;
-  preferEventHeight: boolean;
 }
 
 interface NoteComposerBottomPaddingParams {
@@ -34,11 +35,9 @@ export const NOTE_COMPOSER_KEYBOARD_GAP = 6;
 export function getReportedKeyboardOverlap({
   eventHeight,
   overlapFromScreenY,
-  preferEventHeight,
 }: ReportedKeyboardOverlapParams): number {
   const safeEventHeight = finiteNonNegative(eventHeight);
   const safeScreenOverlap = finiteNonNegative(overlapFromScreenY);
-  if (preferEventHeight && safeEventHeight > 0) return safeEventHeight;
   return Math.max(safeEventHeight, safeScreenOverlap);
 }
 
@@ -63,6 +62,8 @@ export function getNoteKeyboardLayoutMetrics({
   keyboardOverlap,
   bottomInset,
   nativeLayoutOwner,
+  measuredRootBottom,
+  keyboardTop,
 }: NoteKeyboardLayoutParams): NoteKeyboardLayoutMetrics {
   const safeCurrentLayoutHeight = finiteNonNegative(currentLayoutHeight);
   const baselineLayoutHeight = Math.max(
@@ -77,10 +78,14 @@ export function getNoteKeyboardLayoutMetrics({
       ? visibleKeyboardOverlap
       : Math.max(0, baselineLayoutHeight - safeCurrentLayoutHeight)
     : 0;
-  const viewportKeyboardLift = Math.max(
-    0,
-    visibleKeyboardOverlap - systemResizeInset
-  );
+  const hasMeasuredKeyboardOverlap =
+    keyboardVisible &&
+    !nativeLayoutOwner &&
+    typeof measuredRootBottom === "number" && Number.isFinite(measuredRootBottom) &&
+    typeof keyboardTop === "number" && Number.isFinite(keyboardTop);
+  const viewportKeyboardLift = hasMeasuredKeyboardOverlap
+    ? Math.max(0, measuredRootBottom - keyboardTop)
+    : Math.max(0, visibleKeyboardOverlap - systemResizeInset);
   const composerKeyboardLift = Math.max(
     0,
     viewportKeyboardLift - safeBottomInset

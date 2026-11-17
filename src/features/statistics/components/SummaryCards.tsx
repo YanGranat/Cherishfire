@@ -48,7 +48,7 @@ export function SummaryCards({
           {showProgress ? (
             <View className="flex-1">
               <View
-                className="flex-row items-center border-b border-divider px-md py-sm"
+                className="flex-1 flex-row items-center border-b border-divider px-md py-sm"
                 style={{
                   backgroundColor: sectionHeaderBackgroundColor,
                   borderBottomColor: sectionDividerColor,
@@ -58,11 +58,48 @@ export function SummaryCards({
                 <Entypo name="bar-graph" size={15} color={sectionTitleColor} />
                 <Text
                   className="ml-[7px] text-xs font-semibold uppercase"
-                  style={{ color: sectionTitleColor }}
+                  style={{ color: sectionTitleColor, flexShrink: 1 }}
+                  numberOfLines={2}
                 >
                   {t("statistics.progress")}
                 </Text>
               </View>
+            </View>
+          ) : null}
+          <View
+            className="flex-1"
+            style={{
+              borderLeftColor: sectionDividerColor,
+              borderLeftWidth: showProgress ? 0.5 : 0,
+            }}
+          >
+            <View
+              className="flex-1 flex-row items-center border-b border-divider px-md py-sm"
+              style={{
+                backgroundColor: sectionHeaderBackgroundColor,
+                borderBottomColor: sectionDividerColor,
+                borderBottomWidth: 0.5,
+                paddingRight: 44,
+              }}
+            >
+              <MaterialIcons
+                name="check-circle-outline"
+                size={15}
+                color={sectionTitleColor}
+              />
+              <Text
+                className="ml-[7px] text-xs font-semibold uppercase"
+                style={{ color: sectionTitleColor, flexShrink: 1 }}
+                numberOfLines={2}
+              >
+                {t("statistics.perfectDays")}
+              </Text>
+            </View>
+          </View>
+        </View>
+        <View className="flex-row">
+          {showProgress ? (
+            <View className="flex-1">
               <View className="items-center px-md pb-md pt-[14px]">
                 <View
                   className="mb-xs rounded-full px-sm py-[2px]"
@@ -79,41 +116,14 @@ export function SummaryCards({
               </View>
             </View>
           ) : null}
-
           <View
-            className={
-              showProgress ? "flex-1 border-l border-divider" : "flex-1"
-            }
-            style={
-              showProgress
-                ? {
-                    borderLeftColor: sectionDividerColor,
-                    borderLeftWidth: 0.5,
-                  }
-                : undefined
-            }
+            className="flex-1"
+            style={{
+              borderLeftColor: sectionDividerColor,
+              borderLeftWidth: showProgress ? 0.5 : 0,
+            }}
           >
-            <View
-              className="flex-row items-center border-b border-divider px-md py-sm"
-              style={{
-                backgroundColor: sectionHeaderBackgroundColor,
-                borderBottomColor: sectionDividerColor,
-                borderBottomWidth: 0.5,
-              }}
-            >
-              <MaterialIcons
-                name="check-circle-outline"
-                size={15}
-                color={sectionTitleColor}
-              />
-              <Text
-                className="ml-[7px] text-xs font-semibold uppercase"
-                style={{ color: sectionTitleColor }}
-              >
-                {t("statistics.perfectDays")}
-              </Text>
-            </View>
-            <View className="items-center px-md pb-md pt-[14px]">
+            <View className="items-center px-md pb-md pt-[16px]">
               <Text
                 className="text-primary"
                 style={{ fontSize: 28, fontWeight: "700" }}

@@ -6,21 +6,28 @@ import {
   TextInput,
   Pressable,
   Platform,
+  findNodeHandle,
   type LayoutChangeEvent,
   type NativeSyntheticEvent,
   type TextInputContentSizeChangeEventData,
 } from "react-native";
 import { useTranslation } from "react-i18next";
-import { lightTheme, semantic } from "@/theme/colors";
+import { getAccentScheme, lightTheme, semantic } from "@/theme/colors";
 import {
   useVisualLanguage,
   useVisualEffectiveMode,
+  useVisualColorScheme,
 } from "@/components/ScreenPreferencesBoundary";
 import type { Note } from "@/types/note";
 import { formatLocalizedDate } from "@/utils/date";
 import { radii } from "@/theme/tokens";
 import { mergeRecoveredDraft } from "@/utils/recovered-draft";
 import { getNoteEditorContentHeight } from "@/features/notes/utils/editor-visibility";
+import {
+  hasNoteEditorCaretMetrics,
+  readNoteEditorCaretMetrics,
+  type NoteEditorCaretMetrics,
+} from "@/platform/note-editor-metrics";
 import type { NoteEditorRowOwner, NoteEditorSession } from "@/features/notes/utils/note-editor-session";
 export interface NoteEditorGeometryTargets {
   noteId: number;
@@ -28,11 +35,18 @@ export interface NoteEditorGeometryTargets {
   actions: View | null;
   requestId: number;
   getRequestId: () => number;
+  input: TextInput | null;
+  caretMetricsAvailable: boolean;
+  readCaretMetrics: () => Promise<NoteEditorCaretMetrics | null>;
 }
 export interface NoteEditorGeometryMetrics {
   length: number;
   lineCount: number;
   heightBucket: number;
+  selectionAtEnd: boolean;
+  contentRevision: number;
+  selectionStart: number | null;
+  selectionEnd: number | null;
 }
 interface NoteCardProps {
   note: Note & { clientMutationId: string };
@@ -42,7 +56,6 @@ interface NoteCardProps {
     text: string;
   } | null;
   onSave: (id: number, text: string) => boolean;
-  onUnchangedSave?: (id: number) => void;
   onDelete: (id: number) => void;
   onEditingChange?: (
     id: number,
@@ -87,7 +100,6 @@ function NoteCardComponent({
   editorSession,
   recoveryDraft,
   onSave,
-  onUnchangedSave,
   onDelete,
   onEditingChange,
   onEditorUnmount,
@@ -106,6 +118,7 @@ function NoteCardComponent({
   const [editing, setEditing] = useState(initialDraft != null);
   const [editorInitialText, setEditorInitialText] = useState(initialText);
   const [hasDraftText, setHasDraftText] = useState(initialText.trim().length > 0);
+  const hasDraftTextRef = useRef(initialText.trim().length > 0);
   const [editorViewportHeight, setEditorViewportHeight] =
     useState(initialHeight);
   const editorViewportHeightRef = useRef(initialHeight);
@@ -114,8 +127,13 @@ function NoteCardComponent({
   const editorViewportRef = useRef<View>(null);
   const actionsRef = useRef<View>(null);
   const draftTextRef = useRef(initialText);
+  const editorSelectionRef = useRef<{ start: number; end: number } | null>(null);
+  const contentRevisionRef = useRef(0);
+  const nativeEventCountRef = useRef(0);
+  const pendingNativeTextRef = useRef<string | null>(null);
+  const initialEndSelectionPendingRef = useRef(false);
+  const editorStartsAtEndRef = useRef(false);
   const draftBaseTextRef = useRef(initialDraft?.baseText ?? note.text);
-  const hasDraftTextRef = useRef(initialText.trim().length > 0);
   const editingRef = useRef(initialDraft != null);
   const previousEditingRef = useRef(false);
   const focusFrameRef = useRef<number | null>(null);
@@ -131,6 +149,12 @@ function NoteCardComponent({
   const latestGeometryRequestIdRef = useRef(0);
   const renderedNoteTextRef = useRef(note.text);
   const appliedRecoverySequenceRef = useRef(initialDraft?.recoverySequence ?? 0);
+  const updateDraftAvailability = React.useCallback((text: string) => {
+    const next = text.trim().length > 0;
+    if (hasDraftTextRef.current === next) return;
+    hasDraftTextRef.current = next;
+    setHasDraftText(next);
+  }, []);
   const cancelGeometryFrame = React.useCallback(() => {
     if (geometryFrameRef.current == null) return;
     cancelAnimationFrame(geometryFrameRef.current);
@@ -141,6 +165,12 @@ function NoteCardComponent({
       length: draftTextRef.current.length,
       lineCount: draftTextRef.current.split(/\r\n|\r|\n/).length,
       heightBucket: Math.round(height / 8) * 8,
+      selectionAtEnd:
+        editorSelectionRef.current?.start === draftTextRef.current.length &&
+        editorSelectionRef.current?.end === draftTextRef.current.length,
+      contentRevision: contentRevisionRef.current,
+      selectionStart: editorSelectionRef.current?.start ?? null,
+      selectionEnd: editorSelectionRef.current?.end ?? null,
     }),
     [],
   );
@@ -169,11 +199,36 @@ function NoteCardComponent({
         actions: actionsRef.current,
         requestId: pending.requestId,
         getRequestId: () => latestGeometryRequestIdRef.current,
+        input: inputRef.current,
+        caretMetricsAvailable: hasNoteEditorCaretMetrics,
+        readCaretMetrics: async () => {
+          const input = inputRef.current;
+          if (!input || !editorOwner.live || !editingRef.current) return null;
+          const tag = findNodeHandle(input);
+          if (tag == null) return null;
+          const result = await readNoteEditorCaretMetrics(
+            tag, nativeEventCountRef.current, pendingNativeTextRef.current,
+          );
+          if (
+            !result || !editorOwner.live || !editingRef.current || inputRef.current !== input ||
+            latestGeometryRequestIdRef.current !== pending.requestId ||
+            contentRevisionRef.current !== pending.metrics.contentRevision ||
+            result.textLength !== pending.metrics.length ||
+            (pending.metrics.selectionStart != null &&
+              result.selectionStart !== pending.metrics.selectionStart) ||
+            (pending.metrics.selectionEnd != null &&
+              result.selectionEnd !== pending.metrics.selectionEnd) ||
+            (Platform.OS === "android" && result.bottom > editorViewportHeightRef.current + 0.5)
+          ) return null;
+          pendingNativeTextRef.current = null;
+          return result;
+        },
       },
       pending.metrics,
     );
   }, [editorOwner, note.id, onEditorGeometry]);
   const language = useVisualLanguage();
+  const accent = getAccentScheme(useVisualColorScheme()).base;
   const effectiveMode = useVisualEffectiveMode();
   const isDark = effectiveMode === "dark";
   const cardBackgroundColor = isDark ? "#1B1B1B" : lightTheme.surfaceElevated;
@@ -196,14 +251,13 @@ function NoteCardComponent({
     if (editingRef.current) return;
     draftTextRef.current = note.text;
     draftBaseTextRef.current = note.text;
-    const nextHasDraftText = note.text.trim().length > 0;
-    hasDraftTextRef.current = nextHasDraftText;
-    setHasDraftText(nextHasDraftText);
-  }, [note.text]);
+    updateDraftAvailability(note.text);
+  }, [note.text, updateDraftAvailability]);
   useEffect(() => {
     if (!editing) return;
     focusFrameRef.current = requestAnimationFrame(() => {
       focusFrameRef.current = null;
+      if (!editorOwner.live || !editingRef.current) return;
       if (!inputRef.current?.isFocused()) inputRef.current?.focus();
     });
     return () => {
@@ -211,7 +265,7 @@ function NoteCardComponent({
       cancelAnimationFrame(focusFrameRef.current);
       focusFrameRef.current = null;
     };
-  }, [editing]);
+  }, [editing, editorOwner]);
   useEffect(() => {
     return () => {
       if (editingRef.current) {
@@ -219,15 +273,19 @@ function NoteCardComponent({
       }
     };
   }, [editorOwner, note.clientMutationId, note.id]);
-  const leaveEditing = React.useCallback(() => {
+  const leaveEditing = React.useCallback((dismissFocus = false) => {
     if (!editorOwner.live) return;
     if (!editingRef.current) return;
     editingRef.current = false;
+    initialEndSelectionPendingRef.current = false;
+    if (focusFrameRef.current != null) cancelAnimationFrame(focusFrameRef.current);
+    focusFrameRef.current = null;
+    if (dismissFocus) inputRef.current?.blur();
     editorSession.finish(note.clientMutationId);
     onEditingChange?.(note.id, false, undefined, editorOwner);
     setEditing(false);
   }, [editorOwner, editorSession, note.clientMutationId, note.id, onEditingChange]);
-  const saveForEditorHandoff = React.useCallback(() => {
+  const saveForEditorHandoff = React.useCallback((dismissFocus = false) => {
     if (!editingRef.current) return true;
     const trimmed = draftTextRef.current.trim();
     if (!trimmed) {
@@ -240,11 +298,11 @@ function NoteCardComponent({
         return false;
       }
     }
-    leaveEditing();
+    leaveEditing(dismissFocus);
     return true;
   }, [leaveEditing, note.id, onSave]);
   const enterEditing = React.useCallback(
-    (initialDraft = note.text) => {
+    (initialDraft = note.text, placeCursorAtEnd = false) => {
       if (!editorOwner.live) return;
       if (editingRef.current) return;
       const accepted = onEditingChange?.(note.id, true, saveForEditorHandoff, editorOwner);
@@ -255,13 +313,17 @@ function NoteCardComponent({
       // live draft is read separately by Save/handoff and recovery commands.
       setEditorInitialText(initialDraft);
       draftTextRef.current = initialDraft;
+      updateDraftAvailability(initialDraft);
+      contentRevisionRef.current += 1;
+      nativeEventCountRef.current = 0;
+      pendingNativeTextRef.current = null;
+      editorSelectionRef.current = null;
+      initialEndSelectionPendingRef.current = placeCursorAtEnd;
+      editorStartsAtEndRef.current = placeCursorAtEnd;
       draftBaseTextRef.current = initialDraft;
       lastEditMayShrinkRef.current = true;
       pendingGeometryRef.current = null;
       cancelGeometryFrame();
-      const nextHasDraftText = draftTextRef.current.trim().length > 0;
-      hasDraftTextRef.current = nextHasDraftText;
-      setHasDraftText(nextHasDraftText);
       editingRef.current = true;
       editorViewportHeightRef.current = readTextLayoutHeightRef.current;
       setEditorViewportHeight(readTextLayoutHeightRef.current);
@@ -288,6 +350,7 @@ function NoteCardComponent({
       note.text,
       onEditingChange,
       saveForEditorHandoff,
+      updateDraftAvailability,
     ],
   );
   useLayoutEffect(() => {
@@ -321,24 +384,72 @@ function NoteCardComponent({
       nextDraft.split(/\r\n|\r|\n/).length <
         previousDraft.split(/\r\n|\r|\n/).length;
     draftTextRef.current = nextDraft;
+    updateDraftAvailability(nextDraft);
+    contentRevisionRef.current += 1;
+    editorSelectionRef.current = null;
     editorSession.update(note.clientMutationId, {
       text: nextDraft,
       recoverySequence: recoveryDraft.sequence,
     });
-    const nextHasDraftText = nextDraft.trim().length > 0;
-    hasDraftTextRef.current = nextHasDraftText;
-    setHasDraftText(nextHasDraftText);
     if (editingRef.current) {
+      pendingNativeTextRef.current = nextDraft;
+      queueEditorGeometry(editorViewportHeightRef.current);
       inputRef.current?.setNativeProps({ text: nextDraft });
       inputRef.current?.focus();
+      geometryFrameRef.current = requestAnimationFrame(() => {
+        geometryFrameRef.current = null;
+        if (!editorOwner.live || !editingRef.current) return;
+        publishEditorGeometry();
+      });
       return;
     }
     enterEditing(nextDraft);
-  }, [editorSession, enterEditing, note.clientMutationId, note.text, recoveryDraft]);
+  }, [editorOwner, editorSession, enterEditing, note.clientMutationId, note.text, publishEditorGeometry, queueEditorGeometry, recoveryDraft, updateDraftAvailability]);
   const handleEditorFocus = () => {
-    if (!editorOwner.live) return;
+    if (!editorOwner.live || !editingRef.current) return;
+    if (initialEndSelectionPendingRef.current && inputRef.current != null) {
+      initialEndSelectionPendingRef.current = false;
+      const end = draftTextRef.current.length;
+      const input = inputRef.current as TextInput & {
+        setSelectionRange?: (start: number, end: number) => void;
+      };
+      const setSelection = typeof input.setSelection === "function"
+        ? input.setSelection
+        : input.setSelectionRange;
+      if (typeof setSelection === "function") {
+        setSelection.call(input, end, end);
+        editorSelectionRef.current = { start: end, end };
+      }
+    }
     onEditorReady?.(note.id, cardRef.current, "focus");
     queueEditorGeometry(editorViewportHeightRef.current);
+    publishEditorGeometry();
+  };
+  const handleEditorPressIn = () => {
+    if (!editorOwner.live || !editingRef.current) return;
+    initialEndSelectionPendingRef.current = false;
+    editorSelectionRef.current = null;
+    queueEditorGeometry();
+    publishEditorGeometry();
+  };
+  const handleEditorBlur = () => {
+    if (!editorOwner.live || !editingRef.current) return;
+    initialEndSelectionPendingRef.current = false;
+    editorSelectionRef.current = null;
+    queueEditorGeometry();
+    publishEditorGeometry();
+  };
+  const handleEditorSelectionChange = (selection: { start: number; end: number }) => {
+    if (!editorOwner.live || !editingRef.current) return;
+    const previous = editorSelectionRef.current;
+    const next =
+      Number.isInteger(selection.start) && Number.isInteger(selection.end) &&
+      selection.start >= 0 && selection.end >= selection.start
+        ? { start: selection.start, end: selection.end }
+        : null;
+    editorSelectionRef.current = next;
+    if (previous?.start === next?.start && previous?.end === next?.end) return;
+    queueEditorGeometry();
     publishEditorGeometry();
   };
   useLayoutEffect(() => {
@@ -362,47 +473,40 @@ function NoteCardComponent({
     publishEditorGeometry,
     queueEditorGeometry,
   ]);
-  const handleSave = () => {
-    if (!editorOwner.live) return;
-    const trimmed = draftTextRef.current.trim();
-    if (!trimmed) return;
-    if (trimmed === renderedNoteTextRef.current) {
-      onUnchangedSave?.(note.id);
-      leaveEditing();
-      return;
-    }
-    const saved = onSave(note.id, trimmed);
-    if (saved) {
-      leaveEditing();
-    }
-  };
   const handleEditPress = () => {
+    if (!editorOwner.live) return;
     if (editing) {
-      handleSave();
+      saveForEditorHandoff(true);
       return;
     }
-    enterEditing();
+    enterEditing(note.text, true);
   };
-  const handleTextChange = (value: string) => {
-    if (!editorOwner.live) return;
+  const handleTextChange = (value: string, eventCount: number) => {
+    if (!editorOwner.live || !editingRef.current) return;
     const previousValue = draftTextRef.current;
+    const previousSelection = editorSelectionRef.current;
+    if (
+      previousSelection?.start === previousValue.length &&
+      previousSelection?.end === previousValue.length
+    ) {
+      editorSelectionRef.current = { start: value.length, end: value.length };
+    }
     lastEditMayShrinkRef.current =
       value.length < previousValue.length ||
       value.split(/\r\n|\r|\n/).length <
         previousValue.split(/\r\n|\r|\n/).length;
     draftTextRef.current = value;
+    updateDraftAvailability(value);
+    contentRevisionRef.current += 1;
+    nativeEventCountRef.current = eventCount;
+    pendingNativeTextRef.current = null;
     editorSession.update(note.clientMutationId, { text: value });
-    cancelGeometryFrame();
+    queueEditorGeometry(editorViewportHeightRef.current);
     geometryFrameRef.current = requestAnimationFrame(() => {
       geometryFrameRef.current = null;
       if (!editingRef.current) return;
-      queueEditorGeometry(editorViewportHeightRef.current);
       publishEditorGeometry();
     });
-    const nextHasDraftText = value.trim().length > 0;
-    if (nextHasDraftText === hasDraftTextRef.current) return;
-    hasDraftTextRef.current = nextHasDraftText;
-    setHasDraftText(nextHasDraftText);
   };
   const handleReadTextLayout = (event: LayoutChangeEvent) => {
     readTextLayoutHeightRef.current = Math.max(
@@ -498,6 +602,7 @@ function NoteCardComponent({
           {editing ? (
             <View
               ref={editorViewportRef}
+              collapsable={false}
               onLayout={handleEditorLayout}
               style={
                 Platform.OS === "android"
@@ -507,8 +612,11 @@ function NoteCardComponent({
             >
               <TextInput
                 ref={inputRef}
+                nativeID={`${editorStartsAtEndRef.current ? "note-editor-end:" : "note-editor:"}${note.clientMutationId}`}
                 defaultValue={editorInitialText}
-                onChange={(event) => handleTextChange(event.nativeEvent.text)}
+                selectionColor={accent}
+                cursorColor={accent}
+                onChange={(event) => handleTextChange(event.nativeEvent.text, event.nativeEvent.eventCount)}
                 multiline
                 autoFocus
                 className="text-primary"
@@ -528,6 +636,11 @@ function NoteCardComponent({
                 scrollEnabled={false}
                 underlineColorAndroid="transparent"
                 onFocus={handleEditorFocus}
+                onPressIn={handleEditorPressIn}
+                onBlur={handleEditorBlur}
+                onSelectionChange={(event) =>
+                  handleEditorSelectionChange(event.nativeEvent.selection)
+                }
                 onContentSizeChange={handleEditorContentSizeChange}
               />
             </View>
@@ -543,6 +656,8 @@ function NoteCardComponent({
 
           <View
             ref={actionsRef}
+            nativeID={`note-editor-actions:${note.clientMutationId}`}
+            collapsable={false}
             onLayout={handleEditorLayout}
             className="flex-row justify-end mt-sm"
             style={{ marginRight: 0 }}
@@ -565,10 +680,9 @@ function NoteCardComponent({
               disabled={editing && !hasDraftText}
               accessibilityRole="button"
               accessibilityLabel={editing ? t("common.save") : t("notes.edit")}
+              accessibilityState={{ disabled: editing && !hasDraftText }}
               className={`min-h-[32px] min-w-[48px] items-center justify-center pl-sm py-xs ${
-                editing && !hasDraftText
-                  ? "opacity-[0.45]"
-                  : "active:opacity-60"
+                editing && !hasDraftText ? "opacity-[0.45]" : "active:opacity-60"
               }`}
               style={{ paddingRight: 0 }}
             >

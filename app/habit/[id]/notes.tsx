@@ -22,7 +22,6 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
-import Constants, { ExecutionEnvironment } from "expo-constants";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useTranslation } from "react-i18next";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
@@ -41,12 +40,14 @@ import {
   NoteInput,
   type NoteInputHandle,
 } from "@/features/notes/components/NoteInput";
+import { NoteEditorViewport, hasNativeNoteEditorViewport } from "@/platform/note-editor-viewport";
 import {
   getNoteKeyboardLayoutMetrics,
   getReportedKeyboardOverlap,
 } from "@/features/notes/utils/keyboard-layout";
 import {
   getNoteEditorVisibilityDecision,
+  getNoteCaretScrollDelta,
   NOTE_EDITOR_VISIBILITY_TOLERANCE_DP as EDITOR_VISIBILITY_TOLERANCE_DP,
 } from "@/features/notes/utils/editor-visibility";
 import { parseHabitRouteId } from "@/domain/habits/route-id";
@@ -92,6 +93,14 @@ interface PendingEditorCorrection {
   fromOffset: number;
   requestedOffset: number;
 }
+interface NoteRootMeasurementOwner {
+  live: boolean;
+  target: PageMeasurable | null;
+  requestId: number;
+  originY: number | null;
+  layoutWidth: number | null;
+  layoutY: number | null;
+}
 function getEditorGeometryKey(
   entry: ActiveEditorGeometry,
   environmentEpoch: number,
@@ -101,6 +110,10 @@ function getEditorGeometryKey(
     entry.metrics.length,
     entry.metrics.lineCount,
     entry.metrics.heightBucket,
+    entry.metrics.selectionAtEnd,
+    entry.metrics.contentRevision,
+    entry.metrics.selectionStart,
+    entry.metrics.selectionEnd,
     environmentEpoch,
   ].join(":");
 }
@@ -179,10 +192,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
     useVisualEffectiveMode() === "dark"
       ? darkTheme.background
       : lightTheme.background;
-  const nativeKeyboardLayoutOwner =
-    Platform.OS === "ios" ||
-    (Platform.OS === "android" &&
-      Constants.executionEnvironment === ExecutionEnvironment.StoreClient);
+  const nativeKeyboardLayoutOwner = Platform.OS === "ios";
   const [notesSession] = useState(() => notesApplication.getSession(habitId));
   const notesSnapshot = useSyncExternalStore(
     notesSession.subscribe,
@@ -215,6 +225,49 @@ function NotesScreen({ habitId }: { habitId: number }) {
   const [rootLayoutHeight, setRootLayoutHeight] = useState(
     () => Dimensions.get("window").height,
   );
+  const [measuredRootBottom, setMeasuredRootBottom] = useState<number | null>(null);
+  const rootMeasurementRef = useRef<NoteRootMeasurementOwner>({
+    live: true,
+    target: null,
+    requestId: 0,
+    originY: null,
+    layoutWidth: null,
+    layoutY: null,
+  });
+  const measureNoteRoot = useCallback(() => {
+    if (Platform.OS !== "android") return;
+    const owner = rootMeasurementRef.current;
+    const target = owner.target;
+    const requestId = ++owner.requestId;
+    if (!owner.live || !target) return;
+    target.measure((_x, _y, _width, height, _pageX, pageY) => {
+      if (!owner.live || owner.target !== target || owner.requestId !== requestId) return;
+      if (!Number.isFinite(height) || height <= 0 || !Number.isFinite(pageY)) return;
+      owner.originY = pageY;
+      setMeasuredRootBottom(pageY + height);
+    });
+  }, []);
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    const owner = rootMeasurementRef.current;
+    owner.live = true;
+    measureNoteRoot();
+    let previousScreen: { width: number; height: number } = Dimensions.get("screen");
+    const handleScreenDimensionsChange = ({ screen }: { screen: { width: number; height: number } }) => {
+      if (!owner.live) return;
+      if (screen.width === previousScreen.width && screen.height === previousScreen.height) return;
+      previousScreen = screen;
+      owner.originY = null;
+      setMeasuredRootBottom(null);
+      measureNoteRoot();
+    };
+    const subscription = Dimensions.addEventListener("change", handleScreenDimensionsChange);
+    return () => {
+      owner.live = false;
+      owner.requestId += 1;
+      subscription.remove();
+    };
+  }, [measureNoteRoot]);
   const [editingNoteIds, setEditingNoteIds] = useState<Set<number>>(
     () => new Set(),
   );
@@ -237,6 +290,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
   }
   const shouldScrollToNewNoteRef = useRef(false);
   const scrollOffsetRef = useRef(0);
+  const observedScrollGenerationRef = useRef(0);
   const isScrollDragActiveRef = useRef(false);
   const isMomentumScrollActiveRef = useRef(false);
   const topScrollSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -271,6 +325,8 @@ function NotesScreen({ habitId }: { habitId: number }) {
       keyboardOverlap,
       bottomInset: insets.bottom,
       nativeLayoutOwner: nativeKeyboardLayoutOwner,
+      measuredRootBottom,
+      keyboardTop,
     });
   const editorKeyboardLift =
     Platform.OS === "android" && editingNoteIds.size > 0
@@ -279,6 +335,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
   const keyboardVisibleRef = useRef(keyboardVisible);
   keyboardVisibleRef.current = keyboardVisible;
   const hideComposer = editingNoteIds.size > 0 || composerReleasePending;
+  const extendEditorPainting = Platform.OS === "android" && editingNoteIds.size > 0;
   const getKnownHabitExists = useCallback(() => {
     const habitState = useHabitStore.getState();
     return habitState.allHabits.some((habit) => habit.id === habitId) ||
@@ -337,6 +394,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
         ...requestedEntry,
       };
       activeEditorGeometryRef.current = entry;
+      if (hasNativeNoteEditorViewport) return;
       if (keyboardTopRef.current == null) return;
       clearEditorRevealFrame();
       const environmentEpoch = editorGeometryEnvironmentEpochRef.current;
@@ -382,6 +440,8 @@ function NotesScreen({ habitId }: { habitId: number }) {
         const active = activeEditorGeometryRef.current;
         return (
           !run.cancelled &&
+          !isScrollDragActiveRef.current &&
+          !isMomentumScrollActiveRef.current &&
           editorGeometryFramesRef.current.get(entry.requestId) === run &&
           editorGeometryEnvironmentEpochRef.current === environmentEpoch &&
           active?.requestId === entry.requestId &&
@@ -460,23 +520,109 @@ function NotesScreen({ habitId }: { habitId: number }) {
           scheduleRetry();
           return;
         }
-        scrollView.measure(
-          (_vx, _vy, _vw, viewportHeight, _vpx, viewportPageY) => {
-            if (!isCurrent()) {
-              stopAsSuperseded();
+        const scrollGeneration = observedScrollGenerationRef.current;
+        const measurementIsCurrent = () => {
+          if (!isCurrent()) {
+            stopAsSuperseded();
+            return false;
+          }
+          if (observedScrollGenerationRef.current !== scrollGeneration) {
+            scheduleRetry();
+            return false;
+          }
+          return true;
+        };
+        const applyScrollDelta = (delta: number | null) => {
+          if (!measurementIsCurrent()) return;
+          if (delta == null) {
+            scheduleRetry();
+            return;
+          }
+          const currentOffset = Math.max(0, scrollOffsetRef.current);
+          if (Math.abs(delta) <= EDITOR_VISIBILITY_TOLERANCE_DP) {
+            stopAsVisible();
+            return;
+          }
+          const nextOffset = Math.max(0, currentOffset + delta);
+          // Only native onScroll can acknowledge movement. Never accumulate
+          // a second correction from an offset that has not moved yet.
+          if (
+            Math.abs(nextOffset - currentOffset) > EDITOR_VISIBILITY_TOLERANCE_DP &&
+            pendingEditorCorrectionRef.current == null
+          ) {
+            pendingEditorCorrectionRef.current = {
+              requestId: entry.requestId,
+              geometryKey: run.geometryKey,
+              environmentEpoch,
+              fromOffset: currentOffset,
+              requestedOffset: nextOffset,
+            };
+            clearTopScrollSettleTimer();
+            list.scrollToOffset({ offset: nextOffset, animated: false });
+          }
+          scheduleRetry();
+        };
+        if (entry.targets.caretMetricsAvailable) {
+          const input = entry.targets.input;
+          if (!input) {
+            scheduleRetry();
+            return;
+          }
+          void entry.targets.readCaretMetrics().then((caret) => {
+            if (!measurementIsCurrent()) return;
+            if (!caret) {
+              scheduleRetry();
               return;
             }
+            scrollView.measure((_x, _y, _w, viewportHeight, _px, viewportTop) => {
+              if (!measurementIsCurrent()) return;
+              input.measure((_ix, _iy, width, height, _ipx, inputTop) => {
+                if (!measurementIsCurrent()) return;
+                if (
+                  Math.abs(width - caret.hostWidth) > EDITOR_VISIBILITY_TOLERANCE_DP ||
+                  Math.abs(height - caret.hostHeight) > EDITOR_VISIBILITY_TOLERANCE_DP
+                ) {
+                  scheduleRetry();
+                  return;
+                }
+                editor.measure((_ex, _ey, _ew, editorHeight, _epx, editorPageY) => {
+                  if (!measurementIsCurrent()) return;
+                  actions.measure((_ax, _ay, _aw, actionsHeight, _apx, actionsPageY) => {
+                    if (!measurementIsCurrent()) return;
+                    const wholeEditor = getNoteEditorVisibilityDecision({
+                      viewportHeight, viewportPageY: viewportTop, editorHeight, editorPageY,
+                      actionsHeight, actionsPageY, keyboardTop,
+                      selectionAtEnd: entry.metrics.selectionAtEnd,
+                    });
+                    if (!wholeEditor.valid) {
+                      scheduleRetry();
+                      return;
+                    }
+                    applyScrollDelta(
+                      wholeEditor.visibilityMode === "native-caret"
+                        ? getNoteCaretScrollDelta({
+                            viewportTop, viewportHeight, inputTop,
+                            caretTop: caret.top, caretBottom: caret.bottom, keyboardTop,
+                          })
+                        : wholeEditor.visible ? 0 : wholeEditor.scrollDelta,
+                    );
+                  });
+                });
+              });
+            });
+          }, () => {
+            if (measurementIsCurrent()) scheduleRetry();
+          });
+          return;
+        }
+        scrollView.measure(
+          (_vx, _vy, _vw, viewportHeight, _vpx, viewportPageY) => {
+            if (!measurementIsCurrent()) return;
             editor.measure((_ex, _ey, _ew, editorHeight, _epx, editorPageY) => {
-              if (!isCurrent()) {
-                stopAsSuperseded();
-                return;
-              }
+              if (!measurementIsCurrent()) return;
               actions.measure(
                 (_ax, _ay, _aw, actionsHeight, _apx, actionsPageY) => {
-                  if (!isCurrent()) {
-                    stopAsSuperseded();
-                    return;
-                  }
+                  if (!measurementIsCurrent()) return;
                   const decision = getNoteEditorVisibilityDecision({
                     viewportHeight,
                     viewportPageY,
@@ -485,46 +631,17 @@ function NotesScreen({ habitId }: { habitId: number }) {
                     actionsHeight,
                     actionsPageY,
                     keyboardTop,
+                    selectionAtEnd: entry.metrics.selectionAtEnd,
                   });
                   if (!decision.valid) {
                     scheduleRetry();
                     return;
                   }
-                  const currentOffset = Math.max(0, scrollOffsetRef.current);
-                  if (decision.visible) {
-                    stopAsVisible();
+                  if (decision.visibilityMode === "native-caret") {
+                    stopRun();
                     return;
                   }
-                  const nextOffset = Math.max(
-                    0,
-                    currentOffset + decision.scrollDelta,
-                  );
-                  if (
-                    Math.abs(nextOffset - currentOffset) >
-                    EDITOR_VISIBILITY_TOLERANCE_DP
-                  ) {
-                    // `scrollOffsetRef` is owned only by native `onScroll`.
-                    // Keep at most one correction in flight; a following
-                    // measurement may issue a residual correction only after
-                    // native movement acknowledges the previous request.
-                    const pendingCorrection =
-                      pendingEditorCorrectionRef.current;
-                    if (pendingCorrection == null) {
-                      pendingEditorCorrectionRef.current = {
-                        requestId: entry.requestId,
-                        geometryKey: run.geometryKey,
-                        environmentEpoch,
-                        fromOffset: currentOffset,
-                        requestedOffset: nextOffset,
-                      };
-                      clearTopScrollSettleTimer();
-                      list.scrollToOffset({
-                        offset: nextOffset,
-                        animated: false,
-                      });
-                    }
-                  }
-                  scheduleRetry();
+                  applyScrollDelta(decision.visible ? 0 : decision.scrollDelta);
                 },
               );
             });
@@ -595,6 +712,9 @@ function NotesScreen({ habitId }: { habitId: number }) {
   const handleNotesScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const y = event.nativeEvent.contentOffset.y;
+      if (Math.abs(y - scrollOffsetRef.current) > 0.01) {
+        observedScrollGenerationRef.current += 1;
+      }
       scrollOffsetRef.current = y;
       const pendingCorrection = pendingEditorCorrectionRef.current;
       if (pendingCorrection != null) {
@@ -676,11 +796,6 @@ function NotesScreen({ habitId }: { habitId: number }) {
         const selectedOverlap = getReportedKeyboardOverlap({
           eventHeight,
           overlapFromScreenY,
-          // Expo Go owns a native resized viewport, while a standalone
-          // edge-to-edge build keeps the system navigation region in our root.
-          // Use the event height only for the former layout owner.
-          preferEventHeight:
-            Platform.OS === "android" && nativeKeyboardLayoutOwner,
         });
         const nextKeyboardTop =
           typeof screenY === "number" && Number.isFinite(screenY)
@@ -689,6 +804,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
         keyboardTopRef.current = nextKeyboardTop;
         setKeyboardTop(nextKeyboardTop);
         setKeyboardOverlap(selectedOverlap);
+        measureNoteRoot();
         scheduleEditorReveal();
       },
     );
@@ -706,7 +822,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
     };
   }, [
     clearEditorGeometryFrames,
-    nativeKeyboardLayoutOwner,
+    measureNoteRoot,
     scheduleEditorReveal,
   ]);
   useEffect(() => {
@@ -797,8 +913,8 @@ function NotesScreen({ habitId }: { habitId: number }) {
         pendingEditorCorrectionRef.current = null;
         clearEditorRevealFrame();
         clearEditorGeometryFrames();
-        if (!editorHandoffInProgressRef.current && keyboardVisibleRef.current) {
-          setComposerReleasePending(true);
+        if (!editorHandoffInProgressRef.current) {
+          if (keyboardVisibleRef.current) setComposerReleasePending(true);
           Keyboard.dismiss();
         }
       }
@@ -879,11 +995,6 @@ function NotesScreen({ habitId }: { habitId: number }) {
       metrics: NoteEditorGeometryMetrics,
     ) => {
       if (activeEditorSaveRef.current?.noteId !== targets.noteId) return;
-      const geometryKey = getEditorGeometryKey(
-        { requestId, targets, metrics },
-        editorGeometryEnvironmentEpochRef.current,
-      );
-      if (completedEditorGeometryKeyRef.current === geometryKey) return;
       scheduleEditorGeometry({
         requestId,
         targets,
@@ -946,6 +1057,19 @@ function NotesScreen({ habitId }: { habitId: number }) {
   const handleRootLayout = useCallback((event: LayoutChangeEvent) => {
     const nextHeight = event.nativeEvent.layout.height;
     if (!Number.isFinite(nextHeight) || nextHeight <= 0) return;
+    const { width, y } = event.nativeEvent.layout;
+    const owner = rootMeasurementRef.current;
+    if (!owner.live) return;
+    if (Platform.OS === "android") {
+      const target = isPageMeasurable(event.target) ? event.target : null;
+      if (owner.target !== target || owner.layoutWidth !== width || owner.layoutY !== y) {
+        owner.originY = null;
+      }
+      owner.target = target;
+      owner.layoutWidth = width;
+      owner.layoutY = y;
+      setMeasuredRootBottom(owner.originY == null ? null : owner.originY + nextHeight);
+    }
     maximumRootLayoutHeightRef.current = Math.max(
       maximumRootLayoutHeightRef.current,
       nextHeight,
@@ -953,7 +1077,8 @@ function NotesScreen({ habitId }: { habitId: number }) {
     setRootLayoutHeight((current) =>
       Math.abs(current - nextHeight) < 0.5 ? current : nextHeight,
     );
-  }, []);
+    measureNoteRoot();
+  }, [measureNoteRoot]);
   useLayoutEffect(() => {
     for (const change of notesSnapshot.presentationChanges) {
       if (change.sequence <= lastProcessedPresentationChangeRef.current) {
@@ -990,7 +1115,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
   return (
     <KeyboardAvoidingView
       cssInterop={false}
-      style={{ flex: 1, backgroundColor, paddingBottom: editorKeyboardLift }}
+      style={{ flex: 1, backgroundColor }}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       onLayout={handleRootLayout}
     >
@@ -1084,6 +1209,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
           </Text>
         </View>
       ) : (
+        <NoteEditorViewport style={{ flex: 1, paddingBottom: editorKeyboardLift, overflow: "hidden" }}>
         <FlatList
           ref={noteListRef}
           data={noteList}
@@ -1094,6 +1220,8 @@ function NotesScreen({ habitId }: { habitId: number }) {
           }
           bounces
           alwaysBounceVertical
+          style={extendEditorPainting ? { overflow: "visible" } : undefined}
+          removeClippedSubviews={extendEditorPainting ? false : undefined}
           overScrollMode="always"
           onScroll={handleNotesScroll}
           onScrollBeginDrag={handleNotesScrollBeginDrag}
@@ -1106,6 +1234,7 @@ function NotesScreen({ habitId }: { habitId: number }) {
           contentContainerStyle={NOTE_LIST_CONTENT_STYLE}
           onContentSizeChange={handleNoteListContentSizeChange}
         />
+        </NoteEditorViewport>
       )}
 
       {habitExists === true ? (

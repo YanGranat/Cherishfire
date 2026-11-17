@@ -1,20 +1,16 @@
 /** @jsxImportSource nativewind */
 import React, {
   useCallback,
-  useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import {
-  Dimensions,
   GestureResponderEvent,
   Keyboard,
-  KeyboardEvent,
   LayoutChangeEvent,
   PanResponder,
   PanResponderGestureState,
-  Platform,
   StyleSheet,
   Text,
   TextInput,
@@ -25,8 +21,9 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useTranslation } from "react-i18next";
 import { Dialog } from "@/components/ui/Dialog";
 import { DropdownMenu } from "@/components/overlays/DropdownMenu";
-import { useVisualEffectiveMode } from "@/components/ScreenPreferencesBoundary";
-import { darkTheme, lightTheme, normalizeHexColor } from "@/theme/colors";
+import { useVisualColorScheme, useVisualEffectiveMode } from "@/components/ScreenPreferencesBoundary";
+import { darkTheme, getAccentScheme, lightTheme, normalizeHexColor } from "@/theme/colors";
+import { getColorPaletteHeight } from "@/components/ui/dialog-layout";
 import { radii, sizes } from "@/theme/tokens";
 import type { CustomColorScheme } from "@/types/settings";
 import { useRetainedModalSession } from "@/hooks/useRetainedModalSession";
@@ -79,6 +76,7 @@ interface SaturationValueControlProps {
   accessibilityLabel: string;
   panHandlers: ColorPanHandlers;
   onSize: (width: number, height: number) => void;
+  height: number;
 }
 const SaturationValueControl = React.memo(function SaturationValueControl({
   hsv,
@@ -87,6 +85,7 @@ const SaturationValueControl = React.memo(function SaturationValueControl({
   accessibilityLabel,
   panHandlers,
   onSize,
+  height,
 }: SaturationValueControlProps) {
   const [layout, setLayout] = useState({ width: 0, height: 0 });
   const handleLayout = useCallback(
@@ -105,7 +104,7 @@ const SaturationValueControl = React.memo(function SaturationValueControl({
     <View
       onLayout={handleLayout}
       pointerEvents={disabled ? "none" : "auto"}
-      style={[styles.saturationValue, { backgroundColor: hueColor }]}
+      style={[styles.saturationValue, { backgroundColor: hueColor, height }]}
       accessibilityLabel={accessibilityLabel}
       {...panHandlers}
     >
@@ -250,7 +249,9 @@ function CustomColorDialogSession({
 }: CustomColorDialogSessionProps) {
   const { t } = useTranslation();
   const effectiveMode = useVisualEffectiveMode();
-  const { width: windowWidth } = useWindowDimensions();
+  const colorScheme = useVisualColorScheme();
+  const accent = getAccentScheme(colorScheme).base;
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const isDarkTheme = effectiveMode === "dark";
   const palette = isDarkTheme ? darkTheme : lightTheme;
   const isEditing = editing ?? Boolean(initialColor);
@@ -260,9 +261,9 @@ function CustomColorDialogSession({
   const hsvRef = useRef(initialHsv);
   const [hexInput, setHexInput] = useState<string>(initial);
   const hexInputRef = useRef<TextInput>(null);
-  const [isHexInputFocused, setIsHexInputFocused] = useState(false);
-  const [keyboardTop, setKeyboardTop] = useState<number | null>(null);
-  const dialogHeightRef = useRef(0);
+  const [naturalCardHeight, setNaturalCardHeight] = useState(418);
+  const [availableCardHeight, setAvailableCardHeight] = useState(windowHeight - 48);
+  const paletteHeight = getColorPaletteHeight(naturalCardHeight, availableCardHeight);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const submissionInFlightRef = useRef(false);
   const [menuVisible, setMenuVisible] = useState(false);
@@ -272,28 +273,6 @@ function CustomColorDialogSession({
   const hueWidth = useRef(1);
   const saturationValueDragStart = useRef({ x: 0, y: 0 });
   const hueDragStartX = useRef(0);
-  useEffect(() => {
-    if (!visible) return;
-    const showEvent =
-      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
-    const hideEvent =
-      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
-    const showSubscription = Keyboard.addListener(
-      showEvent,
-      (event: KeyboardEvent) => {
-        setIsHexInputFocused(true);
-        setKeyboardTop(event.endCoordinates.screenY);
-      },
-    );
-    const hideSubscription = Keyboard.addListener(hideEvent, () => {
-      setIsHexInputFocused(false);
-      setKeyboardTop(null);
-    });
-    return () => {
-      showSubscription.remove();
-      hideSubscription.remove();
-    };
-  }, [visible]);
   const updateHsv = useCallback(
     (updater: (current: HsvColor) => HsvColor): HsvColor => {
       const next = updater(hsvRef.current);
@@ -426,20 +405,6 @@ function CustomColorDialogSession({
   const previewColor = normalizedColor ?? hsvToHex(hsv);
   const hueColor = hsvToHex({ h: hsv.h, s: 1, v: 1 });
   const dialogWidth = Math.min(320, windowWidth - 32);
-  const screenHeight = Dimensions.get("screen").height;
-  const keyboardTranslateY = useMemo(() => {
-    if (!isHexInputFocused) return 0;
-    const dialogHeight = dialogHeightRef.current;
-    if (keyboardTop == null || dialogHeight <= 0) return -112;
-    const centeredDialogBottom = (screenHeight + dialogHeight) / 2;
-    const overlap = centeredDialogBottom - keyboardTop;
-    const requiredShift = Math.max(0, overlap + 16);
-    const highestSafeShift = Math.max(
-      0,
-      (screenHeight - dialogHeight) / 2 - 12,
-    );
-    return -Math.min(requiredShift, highestSafeShift);
-  }, [isHexInputFocused, keyboardTop, screenHeight]);
   const handleSubmit = async () => {
     if (!normalizedColor || isDuplicate || submissionInFlightRef.current) {
       return;
@@ -509,14 +474,15 @@ function CustomColorDialogSession({
           {
             width: dialogWidth,
             paddingTop: 17,
-            transform: [{ translateY: keyboardTranslateY }],
           },
         ]}
         titleStyle={{ marginBottom: 13 }}
         onContentLayout={(event) => {
-          const nextHeight = event.nativeEvent.layout.height;
-          dialogHeightRef.current = nextHeight;
+          if (!Keyboard.isVisible()) {
+            setNaturalCardHeight(event.nativeEvent.layout.height + 176 - paletteHeight);
+          }
         }}
+        onAvailableHeightChange={setAvailableCardHeight}
         contentBackgroundColor={
           isDarkTheme ? palette.menuSurface : palette.surfaceElevated
         }
@@ -545,6 +511,7 @@ function CustomColorDialogSession({
           accessibilityLabel={t("colorSchemeScreen.saturationValuePicker")}
           panHandlers={saturationValueResponder.panHandlers}
           onSize={handleSaturationValueSize}
+          height={paletteHeight}
         />
 
         <HueControl
@@ -566,12 +533,8 @@ function CustomColorDialogSession({
             ref={hexInputRef}
             value={hexInput}
             onChange={(event) => handleHexChange(event.nativeEvent.text)}
-            onFocus={() => {
-              setIsHexInputFocused(true);
-            }}
-            onBlur={() => {
-              setIsHexInputFocused(false);
-            }}
+            cursorColor={accent}
+            selectionColor={accent}
             autoCapitalize="characters"
             autoCorrect={false}
             editable={!isSubmitting}

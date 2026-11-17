@@ -134,7 +134,7 @@ assert.match(
 );
 assert.match(
   screenPreferencesSource,
-  /function useLiveVisualPreferences\(\)[\s\S]{0,240}useSettingsStore\(\(state\) => state\.theme\)[\s\S]{0,240}useSystemColorMode\(\)/,
+  /function useLiveVisualPreferences\(\)[\s\S]{0,240}useSettingsStore\(\(state\) => state\.theme\)[\s\S]{0,240}useNativeColorMode\(\)/,
   "the application must publish visual preferences while the covered scene is still hidden",
 );
 assert.doesNotMatch(screenPreferencesSource, /snapshotRef\.current/);

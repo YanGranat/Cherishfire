@@ -1,6 +1,38 @@
 export const NOTE_EDITOR_VISIBILITY_TOLERANCE_DP = 0.5;
 export const NOTE_EDITOR_KEYBOARD_GAP_DP = 12;
 
+interface NoteCaretVisibilityParams {
+  viewportTop: number;
+  viewportHeight: number;
+  inputTop: number;
+  caretTop: number;
+  caretBottom: number;
+  keyboardTop: number;
+  gap?: number;
+}
+
+/** Uses the native text layout, including soft wraps and the current selection. */
+export function getNoteCaretScrollDelta({
+  viewportTop, viewportHeight, inputTop, caretTop, caretBottom, keyboardTop,
+  gap = NOTE_EDITOR_KEYBOARD_GAP_DP,
+}: NoteCaretVisibilityParams): number | null {
+  if (
+    ![viewportTop, viewportHeight, inputTop, caretTop, caretBottom, keyboardTop, gap]
+      .every(Number.isFinite) ||
+    viewportHeight <= 0 || caretBottom <= caretTop || gap < 0
+  ) return null;
+  const visibleTop = viewportTop + gap;
+  const visibleBottom = Math.min(viewportTop + viewportHeight, keyboardTop) - gap;
+  if (visibleBottom - visibleTop < caretBottom - caretTop) return null;
+  const top = inputTop + caretTop;
+  const bottom = inputTop + caretBottom;
+  if (bottom > visibleBottom + NOTE_EDITOR_VISIBILITY_TOLERANCE_DP) {
+    return bottom - visibleBottom;
+  }
+  if (top < visibleTop - NOTE_EDITOR_VISIBILITY_TOLERANCE_DP) return top - visibleTop;
+  return 0;
+}
+
 interface NoteEditorContentHeightParams {
   nativeHeight: number;
   currentHeight: number;
@@ -37,6 +69,7 @@ export interface NoteEditorVisibilityParams {
   actionsHeight: number;
   actionsPageY: number;
   keyboardTop: number;
+  selectionAtEnd: boolean;
   keyboardGap?: number;
   tolerance?: number;
 }
@@ -67,7 +100,7 @@ export type NoteEditorVisibilityDecision =
       measurement: NoteEditorVisibilityMeasurement;
       visible: boolean;
       targetTooTall: boolean;
-      visibilityMode: "full-editor" | "actions-and-editor-viewport";
+      visibilityMode: "full-editor" | "actions-and-editor-viewport" | "native-caret";
       scrollDelta: number;
     };
 
@@ -80,6 +113,7 @@ export function getNoteEditorVisibilityDecision({
   actionsHeight,
   actionsPageY,
   keyboardTop,
+  selectionAtEnd,
   keyboardGap = NOTE_EDITOR_KEYBOARD_GAP_DP,
   tolerance = NOTE_EDITOR_VISIBILITY_TOLERANCE_DP,
 }: NoteEditorVisibilityParams): NoteEditorVisibilityDecision {
@@ -125,6 +159,7 @@ export function getNoteEditorVisibilityDecision({
     unionTop >= viewportPageY - tolerance &&
     unionBottom <= effectiveBottom + tolerance;
   const targetTooTall = unionHeight > availableHeight + tolerance;
+  const nativeCaretOwnsVisibility = targetTooTall && !selectionAtEnd;
   const oversizedTargetIsUsable =
     targetTooTall &&
     actionsVisible &&
@@ -132,7 +167,9 @@ export function getNoteEditorVisibilityDecision({
     editorBottom > viewportPageY - tolerance;
 
   let scrollDelta = 0;
-  if (unionBottom > effectiveBottom + tolerance) {
+  if (nativeCaretOwnsVisibility) {
+    scrollDelta = 0;
+  } else if (unionBottom > effectiveBottom + tolerance) {
     scrollDelta = unionBottom - effectiveBottom;
   } else if (!targetTooTall && unionTop < viewportPageY - tolerance) {
     scrollDelta = unionTop - viewportPageY;
@@ -160,9 +197,11 @@ export function getNoteEditorVisibilityDecision({
     },
     visible: unionVisible || oversizedTargetIsUsable,
     targetTooTall,
-    visibilityMode: targetTooTall
-      ? "actions-and-editor-viewport"
-      : "full-editor",
+    visibilityMode: nativeCaretOwnsVisibility
+      ? "native-caret"
+      : targetTooTall
+        ? "actions-and-editor-viewport"
+        : "full-editor",
     scrollDelta,
   };
 }

@@ -1,5 +1,5 @@
 /** @jsxImportSource nativewind */
-import React from "react";
+import React, { useLayoutEffect, useRef, useState } from "react";
 import {
   GestureResponderEvent,
   LayoutChangeEvent,
@@ -11,6 +11,9 @@ import {
   StyleProp,
   TextStyle,
   ViewStyle,
+  Keyboard,
+  Platform,
+  AccessibilityInfo,
 } from "react-native";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import { borders, radii, sizes } from "@/theme/tokens";
@@ -25,6 +28,7 @@ import {
   darkTheme,
 } from "@/theme/colors";
 import { AppModal } from "@/components/ui/AppModal";
+import { getDialogViewportHeight } from "./dialog-layout";
 interface DialogAction {
   label: string;
   onPress: () => void;
@@ -57,7 +61,12 @@ interface DialogProps {
   titleAction?: DialogTitleAction;
   titleAccessory?: React.ReactNode;
   onContentLayout?: (event: LayoutChangeEvent) => void;
+  onAvailableHeightChange?: (height: number) => void;
   onDismiss?: () => void;
+}
+function readInitialKeyboardScreenY(): number | null {
+  const screenY = Keyboard.metrics?.()?.screenY ?? null;
+  return Platform.OS === "ios" && screenY === 0 ? null : screenY;
 }
 // Centered modal with window-bounded width and shared content padding.
 export function Dialog({
@@ -75,9 +84,80 @@ export function Dialog({
   titleAction,
   titleAccessory,
   onContentLayout,
+  onAvailableHeightChange,
   onDismiss,
 }: DialogProps) {
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const rootRef = useRef<View>(null);
+  const rootMeasurementRef = useRef(0);
+  const visibleRef = useRef(visible);
+  const [rootFrame, setRootFrame] = useState({ height: windowHeight, screenY: 0, windowHeight });
+  const [keyboardScreenY, setKeyboardScreenY] = useState<number | null>(
+    () => visible ? readInitialKeyboardScreenY() : null,
+  );
+  useLayoutEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
+  useLayoutEffect(() => {
+    if (!visible) return;
+    const owner = { active: true, request: 0 };
+    const updateScreenY = (screenY: number | null) => {
+      if (!owner.active || !visibleRef.current) return;
+      const request = ++owner.request;
+      if (Platform.OS !== "ios" || screenY !== 0) {
+        setKeyboardScreenY(screenY);
+        return;
+      }
+      const commitPreference = (prefersCrossFade: boolean) => {
+        if (!owner.active || !visibleRef.current || owner.request !== request) return;
+        setKeyboardScreenY(prefersCrossFade ? null : screenY);
+      };
+      void AccessibilityInfo.prefersCrossFadeTransitions().then(
+        commitPreference,
+        () => commitPreference(false),
+      );
+    };
+    const updateKeyboard = () => {
+      updateScreenY(Keyboard.metrics?.()?.screenY ?? null);
+    };
+    updateKeyboard();
+    const show = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillChangeFrame" : "keyboardDidShow",
+      (event) => {
+        updateScreenY(event.endCoordinates.screenY);
+      },
+    );
+    const hide = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
+      () => {
+        updateScreenY(null);
+      },
+    );
+    const terminalSubscriptions = Platform.OS === "ios" ? [
+      Keyboard.addListener("keyboardDidShow", (event) => {
+        updateScreenY(event.endCoordinates.screenY);
+      }),
+      Keyboard.addListener("keyboardDidHide", () => {
+        updateScreenY(null);
+      }),
+    ] : [];
+    return () => {
+      owner.active = false;
+      owner.request += 1;
+      show.remove();
+      hide.remove();
+      terminalSubscriptions.forEach((subscription) => subscription.remove());
+    };
+  }, [visible]);
+  const viewportHeight = getDialogViewportHeight(
+    rootFrame.windowHeight === windowHeight ? rootFrame.height : windowHeight,
+    rootFrame.windowHeight === windowHeight ? rootFrame.screenY : 0,
+    keyboardScreenY,
+  );
+  const availableCardHeight = Math.max(0, viewportHeight - 48);
+  useLayoutEffect(() => {
+    if (visible) onAvailableHeightChange?.(availableCardHeight);
+  }, [availableCardHeight, onAvailableHeightChange, visible]);
   const colorScheme = useVisualColorScheme();
   const effectiveMode = useVisualEffectiveMode();
   const isDarkTheme = effectiveMode === "dark";
@@ -95,7 +175,14 @@ export function Dialog({
       transparent
       animationType="fade"
       statusBarTranslucent
-      onDismiss={onDismiss}
+      onDismiss={() => {
+        if (!visibleRef.current) {
+          rootMeasurementRef.current += 1;
+          setRootFrame({ height: windowHeight, screenY: 0, windowHeight });
+          setKeyboardScreenY(readInitialKeyboardScreenY());
+        }
+        onDismiss?.();
+      }}
       onRequestClose={() => {
         if (!cancelAction || cancelAction.disabled) return false;
         cancelAction.onPress();
@@ -103,7 +190,21 @@ export function Dialog({
       }}
     >
       <Pressable
-        className="flex-1 items-center justify-center"
+        ref={rootRef}
+        onLayout={() => {
+          const root = rootRef.current;
+          const measurement = ++rootMeasurementRef.current;
+          root?.measureInWindow((_x, screenY, _width, height) => {
+            if (!visibleRef.current || rootRef.current !== root || measurement !== rootMeasurementRef.current ||
+              !Number.isFinite(height) || height <= 0 || !Number.isFinite(screenY)) return;
+            setRootFrame((current) =>
+              current.height === height && current.screenY === screenY && current.windowHeight === windowHeight
+                ? current
+                : { height, screenY, windowHeight },
+            );
+          });
+        }}
+        className="flex-1"
         style={{ backgroundColor: scrimColor }}
         onPress={() => {
           if (!cancelAction || cancelAction.disabled) {
@@ -112,6 +213,10 @@ export function Dialog({
           cancelAction.onPress();
         }}
       >
+        <View
+          pointerEvents="box-none"
+          style={{ height: viewportHeight, alignItems: "center", justifyContent: "center" }}
+        >
         <Pressable
           onLayout={onContentLayout}
           onPress={(event) => {
@@ -120,7 +225,7 @@ export function Dialog({
           style={[
             {
               width: Math.min(sizes.dialogWidth, windowWidth - 32),
-              maxHeight: windowHeight - 48,
+              maxHeight: availableCardHeight,
               paddingHorizontal: sizes.dialogPadding,
               paddingTop: sizes.dialogPadding,
               paddingBottom: isAboutVariant ? sizes.dialogPadding : 12,
@@ -219,6 +324,7 @@ export function Dialog({
             className="flex-row justify-end gap-sm mt-lg"
             style={[
               isAboutVariant ? null : { marginTop: 22 },
+              { flexWrap: "wrap" },
               actionsContainerStyle,
             ]}
           >
@@ -241,6 +347,7 @@ export function Dialog({
                     : "min-h-[46px] px-[14px] items-center justify-center active:opacity-60"
                 }
                 style={[
+                  { maxWidth: "100%" },
                   actionButtonStyle,
                   action.buttonStyle,
                   action.disabled ? { opacity: 0.45 } : null,
@@ -278,6 +385,7 @@ export function Dialog({
             ))}
           </View>
         </Pressable>
+        </View>
       </Pressable>
     </AppModal>
   );

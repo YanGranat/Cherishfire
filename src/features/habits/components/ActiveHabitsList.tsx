@@ -27,6 +27,11 @@ import {
 } from "../animation/constants";
 import type { HabitListItemViewModel } from "../presentation/habit-list-view-model";
 import type { SharedValue } from "react-native-reanimated";
+import { haveSameIdSet } from "../utils/order";
+import {
+  getAdjacentReorder,
+  type ReorderDirection,
+} from "@/utils/accessibility-reorder";
 const NOOP_HEIGHT_DELTA_PX = 0.5;
 type HomeReorderReleaseState = "drop" | "no-move" | "cancelled" | "interrupted";
 
@@ -331,9 +336,9 @@ function ActiveHabitsListComponent({
   );
 
   const handleDropCommit = useCallback(
-    (fromIdx: number, toIdx: number) => {
+    (fromIdx: number, toIdx: number, orderIds = itemIdsRef.current) => {
       if (!admitOwnerCallback()) return;
-      const ids = itemIdsRef.current.slice();
+      const ids = orderIds.slice();
       if (
         fromIdx < 0 ||
         toIdx < 0 ||
@@ -352,11 +357,31 @@ function ActiveHabitsListComponent({
       pendingDropOrderRef.current = ids;
       clearFinalizeTimeout();
       finalizeTimeoutRef.current = setTimeout(() => {
-        finalizeDrop();
+        if (pendingDropOrderRef.current === ids) finalizeDrop();
       }, 2500);
       onReorderRef.current(ids);
     },
     [admitOwnerCallback, clearFinalizeTimeout, finalizeDrop],
+  );
+  const handleAccessibilityMove = useCallback(
+    (habitId: number, direction: ReorderDirection) => {
+      if (
+        !admitOwnerCallback() || isBusy || suppressLayoutAnimations ||
+        suppressReflowAnimation || isDragging.value
+      ) return;
+      const currentIds = pendingDropOrderRef.current ?? itemIdsRef.current;
+      if (
+        currentIds.some((id) => id <= 0) ||
+        !haveSameIdSet(currentIds, itemIdsRef.current)
+      ) return;
+      const next = getAdjacentReorder(currentIds, habitId, direction);
+      if (!next) return;
+      handleDropCommit(currentIds.indexOf(habitId), next.indexOf(habitId), currentIds);
+    },
+    [
+      admitOwnerCallback, handleDropCommit, isBusy, isDragging,
+      suppressLayoutAnimations, suppressReflowAnimation,
+    ],
   );
   // Transfer-flight and drag-reorder should never overlap visually.
   // If any stale drag shared value survives between interactions,
@@ -434,6 +459,8 @@ function ActiveHabitsListComponent({
             item={item}
             index={index}
             totalCount={visibleCount}
+            reorderIndex={stableIndex}
+            onAccessibilityMove={handleAccessibilityMove}
             isDragging={isDragging}
             draggedOriginalIndex={draggedOriginalIndex}
             dragTranslateY={dragTranslateY}
@@ -567,6 +594,8 @@ interface ActiveHabitRowProps {
   item: HabitListItemViewModel;
   index: number;
   totalCount: number;
+  reorderIndex: number;
+  onAccessibilityMove: (habitId: number, direction: ReorderDirection) => void;
   isDragging: SharedValue<boolean>;
   draggedOriginalIndex: SharedValue<number>;
   dragTranslateY: SharedValue<number>;
@@ -604,6 +633,8 @@ function areActiveHabitRowPropsEqual(
     sameVisibleItem &&
     previous.index === next.index &&
     previous.totalCount === next.totalCount &&
+    previous.reorderIndex === next.reorderIndex &&
+    previous.onAccessibilityMove === next.onAccessibilityMove &&
     previous.isDragging === next.isDragging &&
     previous.draggedOriginalIndex === next.draggedOriginalIndex &&
     previous.dragTranslateY === next.dragTranslateY &&
@@ -633,6 +664,8 @@ const ActiveHabitRow = React.memo(function ActiveHabitRow({
   item,
   index,
   totalCount,
+  reorderIndex,
+  onAccessibilityMove,
   isDragging,
   draggedOriginalIndex,
   dragTranslateY,
@@ -994,6 +1027,12 @@ const ActiveHabitRow = React.memo(function ActiveHabitRow({
         onPress={onPressHabit}
         onLongPress={onLongPressHabit}
         showDragHandle={true}
+        reorderIndex={reorderIndex}
+        reorderCount={totalCount}
+        reorderDisabled={
+          isBusy || suppressLayoutAnimations || suppressReflowAnimation
+        }
+        onAccessibilityMove={onAccessibilityMove}
         dragHandleGesture={dragGesture}
         animateCheckboxTransitions={animateCheckboxTransitions}
         visualEpoch={checkboxVisualEpoch}

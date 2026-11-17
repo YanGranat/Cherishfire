@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.noteeditormetrics'
+version = '1.0.0'
+
+android {
+  namespace 'expo.modules.noteeditormetrics'
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+}
+
+dependencies {
+  compileOnly 'com.facebook.react:react-android'
+  testImplementation 'junit:junit:4.13.2'
+}

@@ -1,6 +1,6 @@
 /** @jsxImportSource nativewind */
 import React from "react";
-import { View, Text, Pressable } from "react-native";
+import { View, Text, Pressable, useWindowDimensions } from "react-native";
 import { useTranslation } from "react-i18next";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import {
@@ -11,6 +11,7 @@ import type { Habit } from "@/types/habit";
 import { formatLocalizedDate } from "@/utils/date";
 import { radii } from "@/theme/tokens";
 import { lightTheme } from "@/theme/colors";
+import { getArchiveActionGeometry } from "../utils/action-geometry";
 const CARD_BOTTOM_GAP = 11.5;
 interface ArchiveCardProps {
   habit: Habit;
@@ -28,7 +29,41 @@ export const ArchiveCard = React.memo(function ArchiveCard({
   isInteractionBlocked,
 }: ArchiveCardProps) {
   const { t } = useTranslation();
+  const { fontScale } = useWindowDimensions();
   const language = useVisualLanguage();
+  const measurementKey = `${language}:${fontScale}`;
+  const measurementKeyRef = React.useRef(measurementKey);
+  measurementKeyRef.current = measurementKey;
+  const [actionHeights, setActionHeights] = React.useState<{
+    key?: string;
+    delete?: number;
+    restore?: number;
+  }>({});
+  const measuredHeights =
+    actionHeights.key === measurementKey ? actionHeights : {};
+  const estimatedActionHeight = 17.5 * fontScale + 8;
+  const naturalActionHeight = Math.max(
+    measuredHeights.delete ?? estimatedActionHeight,
+    measuredHeights.restore ?? estimatedActionHeight,
+  );
+  const actionGeometry = getArchiveActionGeometry(naturalActionHeight);
+  const actionContentInset = (actionGeometry.height - naturalActionHeight) / 2;
+  const measureAction = (action: "delete" | "restore", height: number) => {
+    if (
+      measurementKeyRef.current !== measurementKey ||
+      !Number.isFinite(height) || height <= 0
+    ) return;
+    setActionHeights((current) => {
+      if (current.key === measurementKey && current[action] === height) {
+        return current;
+      }
+      return {
+        ...(current.key === measurementKey ? current : {}),
+        key: measurementKey,
+        [action]: height,
+      };
+    });
+  };
   const effectiveMode = useVisualEffectiveMode();
   const isDark = effectiveMode === "dark";
   const openArchivePeriod = habit.archiveHistory.findLast(
@@ -73,7 +108,7 @@ export const ArchiveCard = React.memo(function ArchiveCard({
             />
           </View>
 
-          <View className="flex-row justify-end mt-sm">
+          <View className="flex-row justify-end" style={actionGeometry}>
             <Pressable
               onPress={(event) => {
                 event.stopPropagation();
@@ -82,11 +117,22 @@ export const ArchiveCard = React.memo(function ArchiveCard({
               }}
               accessibilityRole="button"
               accessibilityLabel={t("archive.delete")}
-              className="px-sm py-xs mr-xs active:opacity-60"
+              className="mr-xs items-center active:opacity-60"
+              style={{
+                height: actionGeometry.height,
+                paddingTop: actionContentInset,
+              }}
             >
-              <Text className="text-destructive text-sm">
-                {t("archive.delete")}
-              </Text>
+              <View
+                className="px-sm py-xs"
+                onLayout={(event) =>
+                  measureAction("delete", event.nativeEvent.layout.height)
+                }
+              >
+                <Text className="text-destructive text-sm">
+                  {t("archive.delete")}
+                </Text>
+              </View>
             </Pressable>
             <Pressable
               onPress={(event) => {
@@ -96,11 +142,22 @@ export const ArchiveCard = React.memo(function ArchiveCard({
               }}
               accessibilityRole="button"
               accessibilityLabel={t("archive.restore")}
-              className="pl-sm py-xs active:opacity-60"
+              className="items-center active:opacity-60"
+              style={{
+                height: actionGeometry.height,
+                paddingTop: actionContentInset,
+              }}
             >
-              <Text className="text-primary text-sm">
-                {t("archive.restore")}
-              </Text>
+              <View
+                className="pl-sm py-xs"
+                onLayout={(event) =>
+                  measureAction("restore", event.nativeEvent.layout.height)
+                }
+              >
+                <Text className="text-primary text-sm">
+                  {t("archive.restore")}
+                </Text>
+              </View>
             </Pressable>
           </View>
         </View>

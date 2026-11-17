@@ -294,13 +294,15 @@
   "accessibility": {
     "openHabit": "Открыть привычку",
     "markHabit": "Отметить привычку «{{name}}»",
-    "reorderHabit": "Изменить порядок привычки",
+    "reorderItem": "Изменить порядок: {{name}}, позиция {{position}} из {{count}}",
+    "itemPosition": "Позиция {{position}} из {{count}}",
+    "moveUp": "Переместить вверх",
+    "moveDown": "Переместить вниз",
     "openStatistics": "Открыть статистику",
     "showCalendar": "Показать календарь",
     "hideCalendar": "Скрыть календарь",
     "moreOptions": "Дополнительные действия",
     "openNotes": "Открыть заметки",
-    "reorderStatisticsBlock": "Изменить порядок блока статистики",
     "habitStatus": {
       "unmarked": "Не отмечено",
       "unmarkedPast": "Не отмечено в прошлом",

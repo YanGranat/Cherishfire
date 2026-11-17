@@ -11,6 +11,8 @@ import {
 import { calculateStreakStats } from "../src/domain/habits/streak";
 import type { DayRecord, DayStatus } from "../src/types/habit";
 import { assignDisplayOrdersAroundArchivedSlots } from "../src/domain/habits/display-order";
+import { getArchiveActionGeometry } from "../src/features/archive/utils/action-geometry";
+import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-audit";
 
 const timestamp = (year: number, month: number, day: number) =>
   new Date(year, month - 1, day, 12, 0, 0).getTime();
@@ -198,13 +200,13 @@ assert.doesNotMatch(
 );
 assert.match(
   archiveCard,
-  /className="px-sm py-xs mr-xs active:opacity-60"/,
-  "delete action geometry and pressed animation must stay unchanged",
+  /className="px-sm py-xs"/,
+  "delete label geometry must stay unchanged inside its larger touch container",
 );
 assert.match(
   archiveCard,
-  /className="pl-sm py-xs active:opacity-60"/,
-  "restore action geometry and pressed animation must stay unchanged",
+  /className="pl-sm py-xs"/,
+  "restore label geometry must stay unchanged inside its larger touch container",
 );
 assert.match(
   archiveScreen,
@@ -399,5 +401,112 @@ assert.match(
   /catch \(deleteError\)[\s\S]*queryHabitModelById[\s\S]*authoritativeRecordsById[\s\S]*throw deleteError;/,
   "delete failure must restore authoritative habits and records before surfacing the error",
 );
+
+type ControlElement = { type: string; props: Record<string, any> };
+function archiveElements(tree: unknown, predicate: (node: ControlElement) => boolean): ControlElement[] {
+  if (Array.isArray(tree)) return tree.flatMap((node) => archiveElements(node, predicate));
+  if (!tree || typeof tree !== "object" || !("props" in tree)) return [];
+  const node = tree as ControlElement;
+  return [...(predicate(node) ? [node] : []), ...archiveElements(node.props.children, predicate)];
+}
+function auditArchiveActionTargets(
+  source: string,
+  geometry = getArchiveActionGeometry,
+): void {
+  let state: Record<string, number | string> = {};
+  let scale = 1;
+  let language = "en";
+  let blocked = false;
+  let measurementRef: { current: unknown } | undefined;
+  const calls: string[] = [];
+  const jsx = (type: string, props: Record<string, unknown>) => ({ type, props });
+  const render = loadSourceCallableForAudit<(props: unknown) => ControlElement>(
+    source, "ArchiveCard", {
+      exports: {},
+      require: () => ({ jsx, jsxs: jsx }),
+      React: {
+        useRef: (initial: unknown) => measurementRef ??= { current: initial },
+        useState: () => [state, (next: (current: typeof state) => typeof state) => { state = next(state); }],
+      },
+      View: "View", Pressable: "Pressable", Text: "Text", MaterialIcons: "Icon",
+      useTranslation: () => ({ t: (key: string) => key }),
+      useWindowDimensions: () => ({ fontScale: scale }),
+      useVisualLanguage: () => language,
+      useVisualEffectiveMode: () => "light",
+      formatLocalizedDate: () => "2031-04-06",
+      lightTheme: { surfaceElevated: "white" }, radii: { listCard: 10 },
+      CARD_BOTTOM_GAP: 11.5, getArchiveActionGeometry: geometry,
+    }, true,
+  );
+  const props = {
+    habit: { id: 23, name: "Read a page", archiveHistory: [] },
+    onDelete: () => calls.push("delete"), onRestore: () => calls.push("restore"),
+    onPress: () => calls.push("open"), isInteractionBlocked: () => blocked,
+  };
+  const inspect = () => {
+    const tree = render(props);
+    const row = archiveElements(tree, (node) => node.props.className === "flex-row justify-end")[0];
+    const actions = archiveElements(row, (node) => node.type === "Pressable");
+    assert.equal(actions.length, 2);
+    assert.equal(row.props.style.height, actions[0].props.style.height);
+    assert.equal(row.props.style.height, actions[1].props.style.height);
+    assert.ok(row.props.style.height >= 44, "the immediate action parent must contain the complete touch height");
+    const natural = state.key === `${language}:${scale}`
+      ? Math.max(Number(state.delete ?? 17.5 * scale + 8), Number(state.restore ?? 17.5 * scale + 8))
+      : 17.5 * scale + 8;
+    assert.equal(row.props.style.height + row.props.style.marginTop + row.props.style.marginBottom,
+      natural + 8, "expanded touch regions must preserve the card's flow height");
+    for (const action of actions) {
+      assert.equal(row.props.style.marginTop + action.props.style.paddingTop, 8,
+        "the label top must not shift when either action wraps or scales");
+    }
+    assert.equal(tree.props.style.marginBottom, 11.5);
+    return actions;
+  };
+  let actions = inspect();
+  for (const action of actions) {
+    let stops = 0;
+    action.props.onPress({ stopPropagation: () => stops += 1 });
+    assert.equal(stops, 1, "nested actions must stop the card navigation press");
+  }
+  assert.deepEqual(calls, ["delete", "restore"]);
+  blocked = true;
+  actions.forEach((action) => action.props.onPress({ stopPropagation() {} }));
+  assert.deepEqual(calls, ["delete", "restore"], "the existing mutation gate must still reject both actions");
+  const oldMeasurement = actions[0].props.children.props.onLayout;
+  oldMeasurement({ nativeEvent: { layout: { height: 52 } } });
+  actions = inspect();
+  language = "de";
+  inspect();
+  const beforeLateLayout = state;
+  oldMeasurement({ nativeEvent: { layout: { height: 91 } } });
+  assert.equal(state, beforeLateLayout, "an old locale layout cannot replace current measurements");
+  scale = 1.3;
+  actions = inspect();
+  actions[1].props.children.props.onLayout({ nativeEvent: { layout: { height: 47 } } });
+  inspect();
+}
+auditArchiveActionTargets(archiveCard);
+assert.throws(() => auditArchiveActionTargets(
+  archiveCard.replaceAll("if (isInteractionBlocked()) return;", ""),
+), /existing mutation gate/);
+assert.throws(() => auditArchiveActionTargets(
+  archiveCard.replace("event.stopPropagation();", "undefined;"),
+), /stop the card navigation/);
+assert.throws(() => auditArchiveActionTargets(
+  archiveCard,
+  loadSourceCallableForAudit<typeof getArchiveActionGeometry>(
+    readFileSync(resolve(root, "src/features/archive/utils/action-geometry.ts"), "utf8")
+      .replace("marginBottom: -expansion", "marginBottom: 0"),
+    "getArchiveActionGeometry", {},
+  ),
+), /preserve the card's flow height/);
+for (const height of [25.5, 30.75, 43, 44, 58, Number.NaN, -1]) {
+  const geometry = getArchiveActionGeometry(height);
+  const natural = Number.isFinite(height) && height > 0 ? height : 25.5;
+  assert.ok(geometry.height >= 44);
+  assert.ok(geometry.height >= natural);
+  assert.equal(geometry.height + geometry.marginTop + geometry.marginBottom, natural + 8);
+}
 
 console.log("Archive audit passed.");

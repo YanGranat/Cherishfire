@@ -1,6 +1,6 @@
 /** @jsxImportSource nativewind */
 import React, {  useLayoutEffect, useRef } from "react";
-import { View, Text, Pressable } from "react-native";
+import { View, Text, Pressable, Platform } from "react-native";
 import { useTranslation } from "react-i18next";
 import { GestureDetector } from "react-native-gesture-handler";
 import { CheckboxCircle } from "./CheckboxCircle";
@@ -8,6 +8,11 @@ import { Icon } from "@/components/ui/Icon";
 import { sizes } from "@/theme/tokens";
 import type { DayStatus } from "@/types/habit";
 import type { GestureType } from "react-native-gesture-handler";
+import {
+  getReorderActions,
+  getReorderDirection,
+  type ReorderDirection,
+} from "@/utils/accessibility-reorder";
 type CheckboxState = DayStatus | "unmarked" | "unmarkedPast";
 interface HabitItemProps {
   habitId: number;
@@ -22,6 +27,10 @@ interface HabitItemProps {
   showDragHandle: boolean;
   drag?: (pageY: number) => void;
   dragHandleGesture?: GestureType;
+  reorderIndex?: number;
+  reorderCount?: number;
+  reorderDisabled?: boolean;
+  onAccessibilityMove?: (habitId: number, direction: ReorderDirection) => void;
   isActive?: boolean;
   rowOpacity?: number;
   rowScale?: number;
@@ -44,6 +53,10 @@ function HabitItemComponent({
   showDragHandle,
   drag,
   dragHandleGesture,
+  reorderIndex = 0,
+  reorderCount = 0,
+  reorderDisabled = false,
+  onAccessibilityMove,
   isActive,
   rowOpacity = 1,
   rowScale = 1,
@@ -54,6 +67,18 @@ function HabitItemComponent({
 }: HabitItemProps) {
   const { t } = useTranslation();
   const isPendingPersistence = habitId < 0;
+  const canReorder =
+    showDragHandle && !isPendingPersistence &&
+    !reorderDisabled && reorderCount > 1 && onAccessibilityMove != null;
+  const reorderLabels = {
+    up: t("accessibility.moveUp"),
+    down: t("accessibility.moveDown"),
+  };
+  const reorderLabel = t("accessibility.reorderItem", {
+    name: habitName,
+    position: reorderIndex + 1,
+    count: reorderCount,
+  });
   const committedCheckboxVisualRef = useRef({
     presentationEpoch: visualEpoch,
     state: checkboxState,
@@ -92,6 +117,21 @@ function HabitItemComponent({
       accessibilityRole="button"
       accessibilityLabel={habitName}
       accessibilityHint={t("accessibility.openHabit")}
+      accessibilityValue={canReorder
+        ? { text: t("accessibility.itemPosition", {
+            position: reorderIndex + 1, count: reorderCount,
+          }) }
+        : undefined
+      }
+      accessibilityActions={
+        canReorder
+          ? getReorderActions(reorderIndex, reorderCount, reorderLabels, false, Platform.OS)
+          : undefined
+      }
+      onAccessibilityAction={(event) => {
+        const direction = getReorderDirection(event.nativeEvent.actionName, reorderLabels);
+        if (canReorder && direction) onAccessibilityMove?.(habitId, direction);
+      }}
       delayLongPress={180}
       className={`flex-row items-center pr-base ${isActive ? "bg-press-highlight" : ""}`}
       style={{
@@ -141,6 +181,18 @@ function HabitItemComponent({
       {/* Drag handle */}
       {showDragHandle ? (
         <DragHandle
+          accessibilityLabel={reorderLabel}
+          reorderLabels={reorderLabels}
+          accessibilityActions={
+            canReorder
+              ? getReorderActions(reorderIndex, reorderCount, reorderLabels, true, Platform.OS)
+              : []
+          }
+          onAccessibilityMove={
+            canReorder
+              ? (direction) => onAccessibilityMove?.(habitId, direction)
+              : undefined
+          }
           drag={isPendingPersistence ? undefined : drag}
           dragHandleGesture={
             isPendingPersistence ? undefined : dragHandleGesture
@@ -167,6 +219,10 @@ function areHabitItemPropsEqual(
     previous.showDragHandle === next.showDragHandle &&
     previous.drag === next.drag &&
     previous.dragHandleGesture === next.dragHandleGesture &&
+    previous.reorderIndex === next.reorderIndex &&
+    previous.reorderCount === next.reorderCount &&
+    previous.reorderDisabled === next.reorderDisabled &&
+    previous.onAccessibilityMove === next.onAccessibilityMove &&
     previous.isActive === next.isActive &&
     previous.rowOpacity === next.rowOpacity &&
     previous.rowScale === next.rowScale &&
@@ -180,9 +236,19 @@ export const HabitItem = React.memo(HabitItemComponent, areHabitItemPropsEqual);
 interface DragHandleProps {
   drag?: (pageY: number) => void;
   dragHandleGesture?: GestureType;
+  accessibilityLabel: string;
+  reorderLabels: { up: string; down: string };
+  accessibilityActions: { name: string; label: string }[];
+  onAccessibilityMove?: (direction: ReorderDirection) => void;
 }
-function DragHandle({ drag, dragHandleGesture }: DragHandleProps) {
-  const { t } = useTranslation();
+function DragHandle({
+  drag,
+  dragHandleGesture,
+  accessibilityLabel,
+  reorderLabels,
+  accessibilityActions,
+  onAccessibilityMove,
+}: DragHandleProps) {
   const handle = (
     <Pressable
       onPressIn={(event) => {
@@ -197,8 +263,14 @@ function DragHandle({ drag, dragHandleGesture }: DragHandleProps) {
             }
       }
       delayLongPress={dragHandleGesture ? undefined : 100}
-      accessibilityRole="button"
-      accessibilityLabel={t("accessibility.reorderHabit")}
+      accessibilityRole="adjustable"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled: onAccessibilityMove == null }}
+      accessibilityActions={accessibilityActions}
+      onAccessibilityAction={(event) => {
+        const direction = getReorderDirection(event.nativeEvent.actionName, reorderLabels);
+        if (direction) onAccessibilityMove?.(direction);
+      }}
       className="items-center justify-center"
       style={{
         width: sizes.headerIconTouch,

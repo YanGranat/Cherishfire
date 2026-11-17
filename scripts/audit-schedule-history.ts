@@ -633,22 +633,22 @@ assert.deepEqual(replacedUnsortedDay[1].repeatSchedule, {
 const monthlyEditHistory = updateScheduleHistory(
   [
     {
-      effectiveFrom: "2026-07-01",
-      startDate: "2026-07-01",
-      repeatSchedule: { type: "monthly", dates: [1, 5, 10] },
+      effectiveFrom: "2031-08-01",
+      startDate: "2031-08-01",
+      repeatSchedule: { type: "monthly", dates: [1, 6, 14] },
     },
   ],
-  { type: "monthly", dates: [1, 5, 10] },
-  "2026-07-01",
-  "2026-07-24",
-  { type: "monthly", dates: [1, 3, 5, 7, 10, 20, 27] },
-  "2026-07-01",
+  { type: "monthly", dates: [1, 6, 14] },
+  "2031-08-01",
+  "2031-08-23",
+  { type: "monthly", dates: [1, 4, 6, 9, 14, 18, 29] },
+  "2031-08-01",
 );
 assert.equal(
   isHabitScheduledForDate(
-    { type: "monthly", dates: [1, 3, 5, 7, 10, 20, 27] },
-    "2026-07-01",
-    "2026-07-20",
+    { type: "monthly", dates: [1, 4, 6, 9, 14, 18, 29] },
+    "2031-08-01",
+    "2031-08-18",
     [],
     monthlyEditHistory,
   ),
@@ -657,9 +657,9 @@ assert.equal(
 );
 assert.equal(
   isHabitScheduledForDate(
-    { type: "monthly", dates: [1, 3, 5, 7, 10, 20, 27] },
-    "2026-07-01",
-    "2026-07-27",
+    { type: "monthly", dates: [1, 4, 6, 9, 14, 18, 29] },
+    "2031-08-01",
+    "2031-08-29",
     [],
     monthlyEditHistory,
   ),
@@ -894,7 +894,7 @@ const resetCandidates = [
   {
     id: 1,
     habitId: 1,
-    date: "2026-07-01",
+    date: "2031-08-01",
     status: "done" as const,
     createdAt: 1,
     updatedAt: 1,
@@ -902,7 +902,7 @@ const resetCandidates = [
   {
     id: 2,
     habitId: 1,
-    date: "2026-07-24",
+    date: "2031-08-19",
     status: "done" as const,
     createdAt: 2,
     updatedAt: 2,
@@ -910,7 +910,7 @@ const resetCandidates = [
   {
     id: 3,
     habitId: 1,
-    date: "2026-07-25",
+    date: "2031-08-20",
     status: "done" as const,
     createdAt: 3,
     updatedAt: 3,
@@ -919,13 +919,13 @@ const resetCandidates = [
 const movedStartPartition = partitionRecordsForScheduleVersion(
   resetCandidates,
   daily,
-  "2026-07-25",
-  "2026-07-25",
+  "2031-08-20",
+  "2031-08-20",
   false,
 );
 assert.deepEqual(
   movedStartPartition.kept.map((record) => record.date),
-  ["2026-07-25"],
+  ["2031-08-20"],
   "moving the start date forward must permanently remove every earlier mark",
 );
 
@@ -937,18 +937,18 @@ const everyTwoDays: RepeatSchedule = {
 const repeatOnlyPartition = partitionRecordsForScheduleVersion(
   resetCandidates,
   everyTwoDays,
-  "2026-07-02",
-  "2026-07-25",
+  "2031-08-03",
+  "2031-08-20",
   true,
 );
 assert.deepEqual(
   repeatOnlyPartition.kept.map((record) => record.date),
-  ["2026-07-01", "2026-07-24"],
+  ["2031-08-01", "2031-08-19"],
   "a repeat-only edit must keep historical records but remove an impossible current-day mark",
 );
 assert.deepEqual(
   repeatOnlyPartition.removed.map((record) => record.date),
-  ["2026-07-25"],
+  ["2031-08-20"],
 );
 
 const scheduleEditRecords = [
@@ -1026,30 +1026,28 @@ assert.deepEqual(
   ["2026-07-24"],
 );
 
-// Regression: changing an existing weekday habit must update the calendar in
-// the same optimistic snapshot. The start date must not need a second edit to
-// make the new schedule history visible.
-const oldWeekdaysToMonday = planHabitScheduleEdit({
-  previousSchedule: { type: "weekdays", days: [1, 2, 3, 4, 5, 7] },
-  previousStartDate: "2026-08-01",
+// Calendar matching uses the history from the same schedule-edit snapshot.
+const narrowedWeekdaySchedule = planHabitScheduleEdit({
+  previousSchedule: { type: "weekdays", days: [1, 2, 4, 5, 6, 7] },
+  previousStartDate: "2031-08-01",
   records: [],
-  nextSchedule: { type: "weekdays", days: [1] },
-  today: "2026-09-01",
+  nextSchedule: { type: "weekdays", days: [5] },
+  today: "2031-08-19",
 });
-const oldWeekdaysToMondayMatcher = createHabitScheduleMatcher(
-  oldWeekdaysToMonday.repeatSchedule,
-  oldWeekdaysToMonday.startDate,
-  oldWeekdaysToMonday.keptRecords,
-  oldWeekdaysToMonday.scheduleHistory,
+const narrowedWeekdayMatcher = createHabitScheduleMatcher(
+  narrowedWeekdaySchedule.repeatSchedule,
+  narrowedWeekdaySchedule.startDate,
+  narrowedWeekdaySchedule.keptRecords,
+  narrowedWeekdaySchedule.scheduleHistory,
 );
-assert.equal(oldWeekdaysToMonday.effectiveFrom, "2026-09-01");
-assert.equal(oldWeekdaysToMondayMatcher("2026-08-28"), true);
-assert.equal(oldWeekdaysToMondayMatcher("2026-08-29"), false);
-assert.equal(oldWeekdaysToMondayMatcher("2026-09-01"), false);
+assert.equal(narrowedWeekdaySchedule.effectiveFrom, "2031-08-19");
+assert.equal(narrowedWeekdayMatcher("2031-08-12"), true);
+assert.equal(narrowedWeekdayMatcher("2031-08-13"), false);
+assert.equal(narrowedWeekdayMatcher("2031-08-19"), false);
 assert.equal(
-  oldWeekdaysToMondayMatcher("2026-09-07"),
+  narrowedWeekdayMatcher("2031-08-22"),
   true,
-  "the new Monday-only calendar projection must be visible immediately",
+  "the edited weekday calendar projection must be visible immediately",
 );
 
 const moveStartDate = planHabitScheduleEdit({

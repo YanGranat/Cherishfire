@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { URL } from "node:url";
 import ts from "typescript";
+import {
+  getAdjacentReorder, getReorderActions, getReorderDirection,
+} from "../src/utils/accessibility-reorder";
+import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-audit";
 import {
   getStatisticsAutoScrollOffset,
   getStatisticsBlockTop,
@@ -16,7 +21,10 @@ import {
   normalizeStatisticsBlockOrder,
   replaceStatisticsBlockOrder,
 } from "../src/utils/statistics-block-orders";
-import { DEFAULT_SETTINGS } from "../src/types/settings";
+import {
+  DEFAULT_SETTINGS, DEFAULT_STATISTICS_BLOCK_ORDER,
+  type StatisticsBlockId, type StatisticsBlockOrders, type StatisticsPeriod,
+} from "../src/types/settings";
 import { buildYearHeatmapPathLayout } from "../src/features/statistics/utils/year-heatmap-paths";
 import {
   getStatisticsSceneMembershipKey,
@@ -1521,11 +1529,7 @@ assert.match(
 );
 assert.doesNotMatch(sceneSource, /useSafeAreaInsets\(/);
 assert.match(publicComponentSource, /useSafeAreaInsets\(/);
-assert.equal(
-  reorderSource.match(/t\(\s*"accessibility\.reorderStatisticsBlock"\s*\)/g)
-    ?.length,
-  1,
-);
+assert.match(reorderSource, /t\("accessibility\.reorderItem", \{[\s\S]{0,200}position: visibleOrder\.indexOf\(id\) \+ 1,[\s\S]{0,80}count: visibleOrder\.length/);
 assert.match(reorderSource, /const DRAG_ACTIVATE_MS = 180;/);
 assert.match(reorderSource, /const NEIGHBOR_SHIFT_MS = 150;/);
 assert.match(reorderSource, /const DROP_SETTLE_MS = 180;/);
@@ -1810,4 +1814,355 @@ assert.equal(
   365,
 );
 
-console.log("Statistics block reorder audit passed.");
+function auditAccessibleOrderMath(move = getAdjacentReorder): void {
+for (const ids of [["summary"], ["summary", "habit"], ["summary", "bar", "heatmap", "habit"]]) {
+  for (let index = 0; index < ids.length; index += 1) {
+    for (const direction of ["up", "down"] as const) {
+      const next = move(ids, ids[index], direction);
+      const to = index + (direction === "up" ? -1 : 1);
+      if (to < 0 || to >= ids.length) assert.equal(next, null);
+      else {
+        assert.equal(next?.[to], ids[index]);
+        assert.deepEqual([...next!].sort(), [...ids].sort());
+      }
+    }
+    const actions = getReorderActions(index, ids.length, { up: "Move up", down: "Move down" });
+    assert.equal(actions.some((action) => action.name === "decrement"), index > 0);
+    assert.equal(actions.some((action) => action.name === "increment"), index < ids.length - 1);
+  }
+}
+assert.equal(move(["summary", "summary"], "summary", "down"), null);
+assert.equal(move(["summary"], "missing", "up"), null);
+}
+auditAccessibleOrderMath();
+const accessibleOrderSource = readFileSync(new URL("../src/utils/accessibility-reorder.ts", import.meta.url), "utf8");
+for (const [before, after] of [
+  ['direction === "up" ? -1 : 1', 'direction === "up" ? 1 : -1'],
+  ['if (to < 0 || to >= order.length) return null;', 'if (false) return null;'],
+  ['from < 0 || order.lastIndexOf(id) !== from', 'from < 0'],
+]) {
+  assert.equal(accessibleOrderSource.split(before).length, 2);
+  const mutant = loadSourceCallableForAudit<typeof getAdjacentReorder>(
+    accessibleOrderSource.replace(before, after), "getAdjacentReorder", {},
+  );
+  assert.throws(() => auditAccessibleOrderMath(mutant), { name: "AssertionError" });
+}
+assert.deepEqual(getReorderActions(-1, 2, { up: "Up", down: "Down" }), []);
+assert.equal(getReorderDirection("activate"), null);
+assert.equal(getReorderDirection("increment"), "down");
+assert.equal(getReorderDirection("decrement"), "up");
+
+const statisticsScreenSource = readFileSync(new URL("../app/statistics.tsx", import.meta.url), "utf8");
+function createPeriodMoveBlock(
+  screenSource: string,
+  period: StatisticsPeriod,
+  visibleOrder: StatisticsBlockId[],
+  readOrders: () => StatisticsBlockOrders,
+  writeOrder: (period: StatisticsPeriod, order: StatisticsBlockId[]) => unknown,
+) {
+  const onReorderPeriod = loadSourceCallableForAudit<(period: StatisticsPeriod, base: StatisticsBlockId[], next: StatisticsBlockId[]) => void>(
+    screenSource, "handlePeriodReorder", { setPersistedBlockOrder: writeOrder },
+  );
+  return loadSourceCallableForAudit<(id: StatisticsBlockId, direction: "up" | "down") => void>(
+    screenSource, "handleMoveBlock", {
+      period, visibleOrder, blockOrder: readOrders()[period], onReorderPeriod,
+      useSettingsStore: { getState: () => ({ statisticsBlockOrders: readOrders() }) },
+      normalizeStatisticsBlockOrder, DEFAULT_STATISTICS_BLOCK_ORDER, getAdjacentReorder,
+    },
+  );
+}
+function auditAccessibleStatisticsReorder(source: string, screenSource = statisticsScreenSource): void {
+  const original: StatisticsBlockOrders = {
+    week: ["habit", "summary", "heatmap", "bar"],
+    month: ["summary", "bar", "heatmap", "habit"],
+    year: ["heatmap", "bar", "habit", "summary"],
+  };
+  let orders = original;
+  const calls: StatisticsPeriod[] = [];
+  const writeOrder = (period: StatisticsPeriod, next: StatisticsBlockId[]) => {
+    orders = replaceStatisticsBlockOrder(orders, period, next);
+    calls.push(period);
+  };
+  const token = {};
+  const base = {
+    sceneInteractionAdmissionRef: { current: token }, sceneInteractionAdmissionToken: token,
+    sceneInteractive: true, layoutReady: true, activeDropOwnerRef: { current: null },
+    draggingCode: { value: -1 }, settling: { value: 0 },
+    onMoveBlock: createPeriodMoveBlock(screenSource, "month", ["summary", "heatmap", "habit"], () => orders, writeOrder),
+  };
+  const load = (changes: Record<string, unknown> = {}) => loadSourceCallableForAudit<
+    (id: string, direction: "up" | "down") => void
+  >(source, "handleAccessibilityMove", { ...base, ...changes });
+  const move = load();
+  move("summary", "up");
+  move("habit", "down");
+  move("missing", "up");
+  assert.equal(calls.length, 0, "period-relative bounds must use the requested namespace");
+  move("habit", "up");
+  assert.deepEqual(orders.month, ["summary", "bar", "habit", "heatmap"],
+    "relative moves must preserve the hidden block slots of their period");
+  move("habit", "up");
+  assert.deepEqual(orders.month, ["habit", "bar", "summary", "heatmap"],
+    "rapid statistics moves must read the current period order before React commits");
+  move("habit", "down");
+  move("habit", "down");
+  assert.deepEqual(orders, original, "rapid statistics reversal must reach the original order");
+  assert.equal(calls.length, 4);
+  for (const changes of [
+    { sceneInteractionAdmissionToken: {} }, { sceneInteractive: false },
+    { layoutReady: false }, { activeDropOwnerRef: { current: {} } },
+    { draggingCode: { value: 2 } }, { settling: { value: 1 } },
+  ]) {
+    load(changes)("habit", "up");
+    assert.equal(calls.length, 4, "inactive, preparing, dragging and settling scenes must reject accessibility reorder");
+  }
+  const yearToken = {};
+  base.sceneInteractionAdmissionRef.current = yearToken;
+  move("habit", "up");
+  assert.equal(calls.length, 4, "a callback retained by the old period cannot write after its admission expires");
+  load({
+    sceneInteractionAdmissionToken: yearToken,
+    onMoveBlock: createPeriodMoveBlock(screenSource, "year", ["heatmap", "habit", "summary"], () => orders, writeOrder),
+  })("summary", "up");
+  assert.deepEqual(orders.year, ["heatmap", "bar", "summary", "habit"]);
+  assert.deepEqual(orders.month, original.month);
+  assert.deepEqual(orders.week, original.week);
+  assert.deepEqual(calls, ["month", "month", "month", "month", "year"]);
+}
+auditAccessibleStatisticsReorder(reorderSource);
+assert.throws(() => auditAccessibleStatisticsReorder(
+  reorderSource.replace("!sceneInteractive || !layoutReady ||", "false ||"),
+), /inactive, preparing/);
+assert.throws(() => auditAccessibleStatisticsReorder(reorderSource, statisticsScreenSource.replace(
+  "useSettingsStore.getState().statisticsBlockOrders[period]", "blockOrder",
+)), /rapid statistics moves/);
+assert.throws(() => auditAccessibleStatisticsReorder(reorderSource, statisticsScreenSource.replace(
+  "useSettingsStore.getState().statisticsBlockOrders[period]", 'useSettingsStore.getState().statisticsBlockOrders["week"]',
+)), /period-relative bounds|hidden block slots/);
+assert.doesNotMatch(reorderSource, /accessibilityReorderRevisionRef/);
+assert.throws(() => auditAccessibleStatisticsReorder(
+  reorderSource.replace("activeDropOwnerRef.current != null || draggingCode.value >= 0 ||", "false ||"),
+), /inactive, preparing/);
+
+function auditLocalizedStatisticsActions(source: string): void {
+  const tree = ts.createSourceFile("statistics.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const expressions = (attribute: string) => {
+    const values: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isJsxAttribute(node) && node.name.getText(tree) === attribute &&
+        node.initializer && ts.isJsxExpression(node.initializer) && node.initializer.expression) {
+        values.push(node.initializer.expression.getText(tree));
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(tree);
+    assert.equal(values.length, 1);
+    return values[0];
+  };
+  const bindings = ["enabled", "reorderIndex", "reorderCount", "reorderLabels", "getReorderActions", "Platform"];
+  const resolveActions = compileCallbackFactory<() => { name: string; label: string }[]>(
+    `() => (${expressions("accessibilityActions")})`, bindings,
+  );
+  const resolveHandler = compileCallbackFactory<(event: unknown) => void>(
+    expressions("onAccessibilityAction"),
+    ["enabled", "reorderLabels", "getReorderDirection", "onAccessibilityMove", "id"],
+  );
+  for (const locale of ["de", "en", "es", "fr", "it", "nl", "pl", "ru", "uk"]) {
+    const dictionary = JSON.parse(readFileSync(new URL(`../src/i18n/locales/${locale}.json`, import.meta.url), "utf8")).accessibility;
+    const labels = { up: dictionary.moveUp, down: dictionary.moveDown };
+    for (const platform of ["ios", "android"]) {
+      const calls: unknown[] = [];
+      const environment = {
+        enabled: true, reorderLabels: labels, getReorderDirection, id: "heatmap",
+        onAccessibilityMove: (id: string, direction: string) => calls.push([id, direction]),
+      };
+      const handler = resolveHandler(environment);
+      for (const index of [0, 1, 2]) {
+        const actions = resolveActions({
+          enabled: true, reorderIndex: index, reorderCount: 3,
+          reorderLabels: labels, getReorderActions, Platform: { OS: platform },
+        })();
+        for (const action of actions) {
+          const direction = action.label === labels.up ? "up" : "down";
+          assert.equal(action.name, platform === "ios" ? action.label : direction === "up" ? "decrement" : "increment",
+            "the native statistics rotor must receive localized iOS names and stable Android names");
+          const before = calls.length;
+          handler({ nativeEvent: { actionName: action.name } });
+          assert.equal(calls.length, before + 1, "a statistics rotor action must dispatch once");
+          assert.deepEqual(calls.at(-1), ["heatmap", direction]);
+        }
+      }
+      for (const actionName of ["increment", "decrement"]) {
+        const before = calls.length;
+        handler({ nativeEvent: { actionName } });
+        assert.equal(calls.length, before + 1);
+      }
+      const beforeIgnored = calls.length;
+      for (const actionName of ["activate", "unrecognized-reorder-action"]) {
+        handler({ nativeEvent: { actionName } });
+      }
+      const blocked = resolveHandler({ ...environment, enabled: false });
+      blocked({ nativeEvent: { actionName: labels.up } });
+      assert.equal(calls.length, beforeIgnored, "unknown, activation and disabled events must not reorder statistics");
+    }
+  }
+}
+auditLocalizedStatisticsActions(reorderSource);
+assert.throws(() => auditLocalizedStatisticsActions(reorderSource.replace(
+  "getReorderActions(reorderIndex, reorderCount, reorderLabels, true, Platform.OS)",
+  "getReorderActions(reorderIndex, reorderCount, reorderLabels, true)",
+)), /localized iOS names/);
+assert.throws(() => auditLocalizedStatisticsActions(reorderSource.replace(
+  "getReorderDirection(event.nativeEvent.actionName, reorderLabels)",
+  "getReorderDirection(event.nativeEvent.actionName)",
+)), /statistics rotor action must dispatch once/);
+
+function auditSummaryHeaders(source: string): void {
+  const jsx = (type: string, props: Record<string, unknown>) => ({ type, props });
+  type Element = { type: string; props: Record<string, any> };
+  const render = loadSourceCallableForAudit<(props: unknown) => Element>(source, "SummaryCards", {
+    exports: {}, require: () => ({ jsx, jsxs: jsx }), View: "View", Text: "Text",
+    Entypo: "Entypo", MaterialIcons: "MaterialIcons",
+    useTranslation: () => ({ t: (key: string) => key }),
+    useVisualColorScheme: () => "blue", useVisualEffectiveMode: () => "dark",
+    getAccentScheme: () => ({ base: "#334455" }), lightTheme: {},
+  }, true);
+  for (const showProgress of [true, false]) {
+    const tree = render({ periodProgress: "62", perfectDays: { count: 9, total: 20 }, showProgress });
+    const [header, body] = tree.props.children.props.children as Element[];
+    assert.equal(header.props.className, "flex-row",
+      "both headers must share the same stretching Yoga row");
+    const cells = (header.props.children as Element[]).filter(Boolean);
+    assert.equal(cells.length, showProgress ? 2 : 1);
+    for (const cell of cells) {
+      assert.equal(cell.props.className, "flex-1", "column flex owners must not own unequal padding");
+    }
+    const right = cells.at(-1)!.props.children as Element;
+    assert.equal(right.props.style.paddingRight, 44, "the title must reserve the complete inset handle area");
+    const title = right.props.children.at(-1) as Element;
+    assert.equal(title.props.numberOfLines, 2);
+    assert.equal(title.props.style.flexShrink, 1);
+    const rightBody = (body.props.children as Element[]).filter(Boolean).at(-1)!;
+    for (const cell of (body.props.children as Element[]).filter(Boolean)) {
+      assert.equal(cell.props.className, "flex-1", "body column flex owners must not own unequal padding");
+    }
+    assert.equal(rightBody.props.children.props.className, "items-center px-md pb-md pt-[16px]",
+      "perfect-days value must use the aligned16dp top inset");
+    assert.equal(rightBody.props.children.props.children.props.style.fontSize, 28);
+  }
+}
+const summaryCardsSource = readFileSync(new URL("../src/features/statistics/components/SummaryCards.tsx", import.meta.url), "utf8");
+auditSummaryHeaders(summaryCardsSource);
+assert.throws(() => auditSummaryHeaders(summaryCardsSource.replace("paddingRight: 44", "paddingRight: 12")), /complete inset handle area/);
+assert.throws(() => auditSummaryHeaders(summaryCardsSource.replaceAll("numberOfLines={2}", "numberOfLines={1}")), /strictly equal/);
+assert.throws(() => auditSummaryHeaders(summaryCardsSource.replace("pt-[16px]", "pt-[14px]")), /aligned16dp/);
+assert.throws(() => auditSummaryHeaders(summaryCardsSource.replace('className="flex-1"', 'className="flex-1 px-md"')), /unequal padding/);
+
+const settingsStoreSource = readFileSync(new URL("../src/stores/settings-store.ts", import.meta.url), "utf8");
+async function auditRelativeStatisticsPersistence(storeSource = settingsStoreSource): Promise<void> {
+  const initialOrders: StatisticsBlockOrders = {
+    week: ["habit", "summary", "heatmap", "bar"],
+    month: ["summary", "bar", "heatmap", "habit"],
+    year: ["heatmap", "bar", "habit", "summary"],
+  };
+  let state = { statisticsBlockOrders: initialOrders, error: null as string | null };
+  type Completion = { status: string; confirmedValue?: StatisticsBlockId[]; error?: Error };
+  type Submission = { scope: string; completion: Promise<Completion>; resolve: (value: Completion) => void };
+  const submissions: Submission[] = [], writes: Promise<boolean>[] = [];
+  const latest = new Map<string, Submission>();
+  const setStatisticsBlockOrder = loadSourceCallableForAudit<
+    (period: StatisticsPeriod, order: StatisticsBlockId[]) => Promise<boolean>
+  >(storeSource, "setStatisticsBlockOrder", {
+    get: () => state,
+    set: (update: typeof state | ((current: typeof state) => typeof state)) => {
+      state = { ...state, ...(typeof update === "function" ? update(state) : update) };
+    },
+    normalizeStatisticsBlockOrder, replaceStatisticsBlockOrder,
+    settingErrorMessage: () => "Could not save order",
+    settingsMutationCoordinator: {
+      submit: ({ scope }: { scope: string }) => {
+        let resolve!: (value: Completion) => void;
+        const completion = new Promise<Completion>((resolveCompletion) => { resolve = resolveCompletion; });
+        const submission = { scope, completion, resolve };
+        submissions.push(submission);
+        latest.set(scope, submission);
+        return submission;
+      },
+      isLatest: (submission: Submission) => latest.get(submission.scope) === submission,
+    },
+  });
+  const onMoveBlock = createPeriodMoveBlock(
+    statisticsScreenSource, "month", ["summary", "heatmap", "habit"],
+    () => state.statisticsBlockOrders,
+    (period, order) => {
+      const write = setStatisticsBlockOrder(period, order);
+      writes.push(write);
+      return write;
+    },
+  );
+  const token = {};
+  const admission = { current: token as object | null };
+  const move = loadSourceCallableForAudit<(id: string, direction: "up" | "down") => void>(
+    reorderSource, "handleAccessibilityMove", {
+      sceneInteractionAdmissionRef: admission, sceneInteractionAdmissionToken: token,
+      sceneInteractive: true, layoutReady: true,
+      activeDropOwnerRef: { current: null }, draggingCode: { value: -1 }, settling: { value: 0 },
+      onMoveBlock,
+    },
+  );
+  const expectedLatest = ["heatmap", "bar", "summary", "habit"];
+  try {
+    move("habit", "up"); move("habit", "up");
+    assert.deepEqual(state.statisticsBlockOrders.month, ["habit", "bar", "summary", "heatmap"]);
+    move("habit", "down"); move("habit", "down");
+    assert.deepEqual(state.statisticsBlockOrders, initialOrders);
+    move("heatmap", "up");
+    assert.deepEqual(state.statisticsBlockOrders.month, expectedLatest,
+      "the actual settings owner must publish all accepted relative commands before persistence");
+    assert.equal(writes.length, 5, "every accepted relative command must reach the settings owner");
+    admission.current = null;
+    move("heatmap", "down");
+    assert.equal(writes.length, 5);
+    submissions[0].resolve({ status: "failed", confirmedValue: initialOrders.month, error: new Error("Write failed") });
+    await writes[0];
+    assert.deepEqual(state.statisticsBlockOrders.month, expectedLatest,
+      "an older settings completion must not replace the latest accessible order");
+  } finally {
+    submissions.forEach((submission) => submission.resolve({ status: "committed" }));
+    await Promise.all(writes);
+  }
+  assert.deepEqual(state.statisticsBlockOrders.month, expectedLatest);
+  assert.deepEqual(state.statisticsBlockOrders.week, initialOrders.week);
+  assert.deepEqual(state.statisticsBlockOrders.year, initialOrders.year);
+  assert.ok(submissions.every((submission) => submission.scope === "statisticsOrder:month"));
+}
+const relativeOrderDeadline = setTimeout(() => {
+  console.error("Statistics accessibility persistence audit did not complete within10seconds");
+  process.exitCode = 1;
+}, 10_000);
+void (async () => {
+  await auditRelativeStatisticsPersistence();
+  assert.equal(settingsStoreSource.split("if (settingsMutationCoordinator.isLatest(submission))").length > 1, true);
+  const methodTree = ts.createSourceFile("settings.ts", settingsStoreSource, ts.ScriptTarget.Latest, true);
+  let methodRange: { start: number; end: number } | undefined;
+  const findMethod = (node: ts.Node): void => {
+    if (ts.isMethodDeclaration(node) && node.name.getText(methodTree) === "setStatisticsBlockOrder") {
+      methodRange = { start: node.getStart(methodTree), end: node.end };
+    }
+    ts.forEachChild(node, findMethod);
+  };
+  findMethod(methodTree);
+  assert.ok(methodRange);
+  const methodSource = settingsStoreSource.slice(methodRange.start, methodRange.end);
+  assert.equal(methodSource.split("if (settingsMutationCoordinator.isLatest(submission))").length, 2);
+  const staleCompletionSource = settingsStoreSource.slice(0, methodRange.start) +
+    methodSource.replace("if (settingsMutationCoordinator.isLatest(submission))", "if (true)") +
+    settingsStoreSource.slice(methodRange.end);
+  await assert.rejects(() => auditRelativeStatisticsPersistence(staleCompletionSource), {
+    name: "AssertionError", message: /older settings completion/,
+  });
+  console.log("Statistics block reorder audit passed.");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+}).finally(() => clearTimeout(relativeOrderDeadline));

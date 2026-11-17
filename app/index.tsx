@@ -1401,14 +1401,15 @@ const HabitListScreenContent = React.memo(function HabitListScreenContent({
         return;
       }
       if (!haveSameIdSet(activeHabitIds, reorderedIds)) return;
+      const currentOrderIds = useHabitStore.getState().habits.map((habit) => habit.id);
       const fullOrder = mergeReorderedSubsetIntoOrder(
-        habitOrderIds,
+        currentOrderIds,
         reorderedIds,
       );
-      if (!fullOrder || isSameOrder(fullOrder, habitOrderIds)) return;
+      if (!fullOrder || isSameOrder(fullOrder, currentOrderIds)) return;
       void (() => reorderHabits(fullOrder))();
     },
-    [activeHabitIds, habitOrderIds, reorderHabits],
+    [activeHabitIds, reorderHabits],
   );
   // --- Context menu ---
   const openContextMenu = useCallback(

@@ -28,6 +28,8 @@ import {
   DESCRIPTION_LINES_MIN,
 } from "../src/application/settings/habit-description-lines-setting";
 import { loadSourceCallableForAudit } from "./fixtures/load-source-callable-for-audit";
+import { auditNoteEditorLifecycle } from "./fixtures/audit-note-editor-lifecycle";
+import { assertNoteEditorViewportLayout } from "./audit-note-editor-viewport";
 
 const root = resolve(import.meta.dirname, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
@@ -1684,7 +1686,7 @@ assert.match(
   "failure reason callbacks must remain current while its session is open",
 );
 assert.match(dialog, /onDismiss\?: \(\) => void/);
-assert.match(dialog, /onDismiss=\{onDismiss\}/);
+assert.match(dialog, /onDismiss=\{\(\) => \{[\s\S]{0,360}onDismiss\?\.\(\);/);
 assert.match(dialog, /animationType="fade"/);
 assert.match(
   dialog,
@@ -2560,28 +2562,10 @@ assert.doesNotMatch(
   /setDialogHeight|setSaturationValueLayout|setHueLayoutWidth/,
   "initial native picker measurements must not rebuild the complete dialog owner",
 );
-assert.match(customColorDialog, /const dialogHeightRef = useRef\(0\)/);
-assert.match(
-  customColorDialog,
-  /setKeyboardTop\(event\.endCoordinates\.screenY\)/,
-);
-assert.match(
-  customColorDialog,
-  /const centeredDialogBottom = \(screenHeight \+ dialogHeight\) \/ 2/,
-);
-assert.match(
-  customColorDialog,
-  /const overlap = centeredDialogBottom - keyboardTop/,
-);
-assert.match(
-  customColorDialog,
-  /const requiredShift = Math\.max\(0, overlap \+ 16\)/,
-);
-assert.match(
-  customColorDialog,
-  /return -Math\.min\(requiredShift, highestSafeShift\)/,
-);
-assert.match(customColorDialog, /return -112/);
+assert.match(customColorDialog, /getColorPaletteHeight\(naturalCardHeight, availableCardHeight\)/);
+assert.match(customColorDialog, /onAvailableHeightChange=\{setAvailableCardHeight\}/);
+assert.doesNotMatch(customColorDialog, /keyboardTranslateY|setKeyboardTop|Keyboard\.addListener/,
+  "color content must share Dialog's keyboard viewport instead of adding a second offset owner");
 assert.match(customColorDialog, /paddingTop: 17/);
 assert.match(customColorDialog, /titleStyle=\{\{ marginBottom: 13 \}\}/);
 assert.match(
@@ -2608,33 +2592,7 @@ assert.doesNotMatch(
   customColorDialog,
   /errorKey \? t\(errorKey\) : t\("colorSchemeScreen\.hexLabel"\)/,
 );
-assert.match(
-  customColorDialog,
-  /transform: \[\{ translateY: keyboardTranslateY \}\]/,
-);
 assert.match(customColorDialog, /function CustomColorDialogSession\(/);
-assert.match(
-  customColorDialog,
-  /onFocus=\{\(\) => \{[\s\S]{0,240}setIsHexInputFocused\(true\);[\s\S]{0,80}\}\}/,
-);
-const hexBlurHandlerSource = customColorDialog.slice(
-  customColorDialog.indexOf("onBlur={() => {"),
-  customColorDialog.indexOf('autoCapitalize="characters"'),
-);
-assert.ok(hexBlurHandlerSource.length > 0);
-assert.match(
-  hexBlurHandlerSource,
-  /onBlur=\{\(\) => \{\s*setIsHexInputFocused\(false\);/,
-  "HEX blur must release the focused-state keyboard offset",
-);
-assert.match(
-  customColorDialog,
-  /Platform\.OS === "ios" \? "keyboardWillShow" : "keyboardDidShow"[\s\S]{0,320}setIsHexInputFocused\(true\)/,
-);
-assert.match(
-  customColorDialog,
-  /Platform\.OS === "ios" \? "keyboardWillHide" : "keyboardDidHide"[\s\S]{0,650}setIsHexInputFocused\(false\)/,
-);
 assert.match(
   customColorDialog,
   /icon: "more-vert"[\s\S]{0,160}colorSchemeScreen\.colorOptions/,
@@ -2737,7 +2695,7 @@ assert.match(
 );
 assert.match(
   notesScreen,
-  /getReportedKeyboardOverlap\(\{[\s\S]{0,400}preferEventHeight:[\s\S]{0,120}Platform\.OS === "android" && nativeKeyboardLayoutOwner[\s\S]{0,900}setKeyboardOverlap\(selectedOverlap\)/,
+  /getReportedKeyboardOverlap\(\{\s*eventHeight,\s*overlapFromScreenY,\s*\}\);[\s\S]{0,900}setKeyboardOverlap\(selectedOverlap\)/,
 );
 assert.match(
   notesScreen,
@@ -2759,8 +2717,8 @@ assert.doesNotMatch(
 );
 assert.match(
   notesScreen,
-  /Constants\.executionEnvironment === ExecutionEnvironment\.StoreClient/,
-  "Expo Go must use native root resize as its keyboard-layout owner",
+  /const nativeKeyboardLayoutOwner = Platform\.OS === "ios";/,
+  "iOS padding owns its viewport while Android accounts for measured root resize",
 );
 assert.doesNotMatch(
   notesScreen,
@@ -2772,6 +2730,7 @@ assert.match(
   /const editorKeyboardLift =[\s\S]{0,120}editingNoteIds\.size > 0[\s\S]{0,80}viewportKeyboardLift/,
 );
 function assertNotesKeyboardViewport(source: string): void {
+  assertNoteEditorViewportLayout(source);
   const tree = ts.createSourceFile(
     "notes.tsx",
     source,
@@ -2838,8 +2797,8 @@ function assertNotesKeyboardViewport(source: string): void {
   const fields = style.expression.properties;
   assert.equal(
     fields.length,
-    3,
-    "the viewport style must preserve its three primitive fields",
+    2,
+    "the screen root style must preserve its two primitive fields without another keyboard inset",
   );
   const field = (name: string): ts.Expression => {
     const matches = fields.filter(
@@ -2869,11 +2828,6 @@ function assertNotesKeyboardViewport(source: string): void {
     ts.isNumericLiteral(flex) && Number(flex.text) === 1,
     "the keyboard viewport must retain flex-one geometry",
   );
-  const padding = field("paddingBottom");
-  assert.ok(
-    ts.isIdentifier(padding) && padding.text === "editorKeyboardLift",
-    "the note list viewport must end above an overlay keyboard while a card is edited",
-  );
   const background = field("backgroundColor");
   assert.ok(
     ts.isIdentifier(background) && background.text === "backgroundColor",
@@ -2886,6 +2840,9 @@ for (const [before, after] of [
   ["flex: 1, backgroundColor", "flex: 0, backgroundColor"],
   ["paddingBottom: editorKeyboardLift", "paddingBottom: 0"],
   ["paddingBottom: editorKeyboardLift", "paddingBottom: composerKeyboardLift"],
+  ["style={{ flex: 1, backgroundColor }}", "style={{ flex: 1, backgroundColor, paddingBottom: editorKeyboardLift }}"],
+  ['paddingBottom: editorKeyboardLift, overflow: "hidden"', 'paddingBottom: editorKeyboardLift, overflow: "visible"'],
+  ["removeClippedSubviews={extendEditorPainting ? false : undefined}", "removeClippedSubviews={extendEditorPainting ? true : undefined}"],
 ]) {
   assert.equal(
     notesScreen.split(before).length - 1,
@@ -2986,43 +2943,41 @@ assert.deepEqual(
 );
 assert.deepEqual(
   getNoteKeyboardLayoutMetrics({
-    maximumLayoutHeight: 791.3,
-    currentLayoutHeight: 791.3,
-    keyboardOverlap: 284,
+    maximumLayoutHeight: 818.6,
+    currentLayoutHeight: 818.6,
+    keyboardOverlap: 272,
     bottomInset: 0,
     nativeLayoutOwner: true,
   }),
   {
     keyboardVisible: true,
-    systemResizeInset: 284,
+    systemResizeInset: 272,
     composerKeyboardLift: 0,
     viewportKeyboardLift: 0,
   },
-  "a native root resize remains the sole layout owner when window dimensions are stale",
+  "iOS keyboard padding must remain the sole viewport owner",
 );
 assert.equal(
   getReportedKeyboardOverlap({
-    eventHeight: 284,
-    overlapFromScreenY: 331.3,
-    preferEventHeight: true,
+    eventHeight: 272,
+    overlapFromScreenY: 318.3,
   }),
-  284,
-  "Android keyboard height must exclude the system navigation region",
+  318.3,
+  "raw keyboard overlap must retain the greater reported physical extent",
 );
 assert.equal(
   getReportedKeyboardOverlap({
-    eventHeight: 284,
-    overlapFromScreenY: 331.3,
-    preferEventHeight: false,
+    eventHeight: 272,
+    overlapFromScreenY: 318.3,
   }),
-  331.3,
-  "a standalone edge-to-edge root must use the physical keyboard top, including the system navigation region",
+  318.3,
+  "an Android edge-to-edge root must use the physical keyboard top, including the system navigation region",
 );
 const standaloneComposerMetrics = getNoteKeyboardLayoutMetrics({
-  maximumLayoutHeight: 872.7,
-  currentLayoutHeight: 872.7,
-  keyboardOverlap: 331.3,
-  bottomInset: 47.3,
+  maximumLayoutHeight: 914.7,
+  currentLayoutHeight: 914.7,
+  keyboardOverlap: 318.3,
+  bottomInset: 46.3,
   nativeLayoutOwner: false,
 });
 assert.deepEqual(
@@ -3030,27 +2985,26 @@ assert.deepEqual(
   {
     keyboardVisible: true,
     systemResizeInset: 0,
-    composerKeyboardLift: 284,
-    viewportKeyboardLift: 331.3,
+    composerKeyboardLift: 272,
+    viewportKeyboardLift: 318.3,
   },
   "standalone Notes must lift both the composer and editor viewport to the physical keyboard top",
 );
 assert.equal(
   getNoteComposerBottomPadding({
-    bottomInset: 47.3,
+    bottomInset: 46.3,
     extraKeyboardLift: standaloneComposerMetrics.composerKeyboardLift,
     keyboardVisible: true,
   }),
-  337.3,
+  324.3,
   "an edge-to-edge composer must preserve a six dp gap above the physical keyboard top",
 );
 assert.equal(
   getReportedKeyboardOverlap({
     eventHeight: 0,
-    overlapFromScreenY: 331.3,
-    preferEventHeight: true,
+    overlapFromScreenY: 318.3,
   }),
-  331.3,
+  318.3,
   "screen coordinates remain a fallback when Android omits keyboard height",
 );
 assert.equal(NOTE_COMPOSER_KEYBOARD_GAP, 6);
@@ -3070,16 +3024,16 @@ assert.equal(
     keyboardVisible: true,
   }),
   6,
-  "an Expo Go native resize must leave only the requested 6dp keyboard gap",
+  "native resizing must preserve the six dp composer gap",
 );
 assert.equal(
   getNoteComposerBottomPadding({
     bottomInset: 24,
-    extraKeyboardLift: 260,
+    extraKeyboardLift: 248,
     keyboardVisible: true,
   }),
-  290,
-  "the standalone fallback must still cover a 284dp keyboard plus the 6dp gap",
+  278,
+  "the standalone fallback must cover the keyboard height plus the six dp gap",
 );
 assert.equal(
   (notesScreen.match(/<InlineErrorBanner/g) ?? []).length,
@@ -3157,7 +3111,7 @@ assert.match(
 );
 assert.match(
   notesScreen,
-  /!editorHandoffInProgressRef\.current &&[\s\S]{0,100}keyboardVisibleRef\.current[\s\S]{0,360}setComposerReleasePending\(true\);[\s\S]{0,80}Keyboard\.dismiss\(\)/,
+  /if \(!editorHandoffInProgressRef\.current\) \{\s*if \(keyboardVisibleRef\.current\) setComposerReleasePending\(true\);\s*Keyboard\.dismiss\(\)/,
   "finishing one editor should dismiss the keyboard without breaking editor-to-editor focus handoff",
 );
 assert.match(notesScreen, /onEditingChange=\{handleNoteEditingChange\}/);
@@ -3282,17 +3236,17 @@ assert.ok(
 );
 assert.match(
   editorVisibilityScrollBlock,
-  /currentOffset \+ decision\.scrollDelta/,
+  /currentOffset \+ delta/,
   "a hidden editor must apply only the measured visibility delta",
 );
 assert.match(
   editorVisibilityScrollBlock,
-  /list\.scrollToOffset\(\{[\s\S]*?offset: nextOffset,[\s\S]*?animated: false,[\s\S]*?\}\);/,
+  /list\.scrollToOffset\(\{\s*offset: nextOffset,\s*animated: false\s*,?\s*\}\);/,
   "editor visibility correction must be immediate and target the measured offset",
 );
 assert.match(
   editorVisibilityScrollBlock,
-  /const pendingCorrection =[\s\S]{0,160}pendingEditorCorrectionRef\.current;[\s\S]{0,160}if \(pendingCorrection == null\) \{[\s\S]{0,260}pendingEditorCorrectionRef\.current = \{[\s\S]{0,260}requestedOffset: nextOffset/,
+  /pendingEditorCorrectionRef\.current == null[\s\S]{0,100}pendingEditorCorrectionRef\.current = \{[\s\S]{0,260}requestedOffset: nextOffset/,
   "only one native editor scroll correction may be in flight at a time",
 );
 assert.doesNotMatch(
@@ -3302,7 +3256,7 @@ assert.doesNotMatch(
 );
 assert.match(
   notesScreen,
-  /function getEditorGeometryKey\([\s\S]{0,420}entry\.targets\.noteId[\s\S]{0,160}entry\.metrics\.lineCount[\s\S]{0,160}entry\.metrics\.heightBucket[\s\S]{0,120}environmentEpoch/,
+  /function getEditorGeometryKey\([\s\S]{0,420}entry\.targets\.noteId[\s\S]{0,160}entry\.metrics\.lineCount[\s\S]{0,160}entry\.metrics\.heightBucket[\s\S]{0,320}environmentEpoch/,
   "duplicate layout requests for the same text geometry must share one correction key",
 );
 assert.match(
@@ -3373,6 +3327,7 @@ assert.equal(
 );
 
 const visibleEditorDecision = getNoteEditorVisibilityDecision({
+  selectionAtEnd: true,
   viewportHeight: 400,
   viewportPageY: 100,
   editorHeight: 100,
@@ -3392,6 +3347,7 @@ assert.equal(
   0,
 );
 const coveredEditorDecision = getNoteEditorVisibilityDecision({
+  selectionAtEnd: true,
   viewportHeight: 400,
   viewportPageY: 100,
   editorHeight: 50,
@@ -3406,6 +3362,7 @@ assert.equal(
   "a keyboard-covered action row must move by the overlap plus the visual safety gap",
 );
 const oversizedEditorDecision = getNoteEditorVisibilityDecision({
+  selectionAtEnd: true,
   viewportHeight: 400,
   viewportPageY: 100,
   editorHeight: 400,
@@ -3422,6 +3379,7 @@ assert.equal(
   "an editor taller than the viewport is usable only when its actions and text viewport are visible",
 );
 const coveredOversizedEditorDecision = getNoteEditorVisibilityDecision({
+  selectionAtEnd: true,
   viewportHeight: 400,
   viewportPageY: 100,
   editorHeight: 400,
@@ -3438,6 +3396,7 @@ assert.equal(
 );
 assert.deepEqual(
   getNoteEditorVisibilityDecision({
+    selectionAtEnd: true,
     viewportHeight: 0,
     viewportPageY: 100,
     editorHeight: 50,
@@ -3486,7 +3445,7 @@ assert.match(
 );
 assert.match(
   noteCard,
-  /const enterEditing[\s\S]{0,900}draftTextRef\.current = initialDraft;[\s\S]{0,100}draftBaseTextRef\.current = initialDraft;[\s\S]{0,500}editingRef\.current = true/,
+  /const enterEditing[\s\S]{0,900}draftTextRef\.current = initialDraft;[\s\S]{0,360}draftBaseTextRef\.current = initialDraft;[\s\S]{0,500}editingRef\.current = true/,
   "the uncontrolled editor must synchronously snapshot one draft before it mounts",
 );
 assert.match(noteCard, /ref=\{cardRef\}[\s\S]{0,80}collapsable=\{false\}/);
@@ -3517,7 +3476,7 @@ assert.match(
 );
 assert.match(
   noteCard,
-  /height: editorViewportHeight, overflow: "hidden"[\s\S]{0,700}height: editorViewportHeight \+ NOTE_LINE_HEIGHT/,
+  /height: editorViewportHeight, overflow: "hidden"[\s\S]{0,1000}height: editorViewportHeight \+ NOTE_LINE_HEIGHT/,
   "Android must keep one clipped spare line inside the native editor to avoid the multiline Enter jump",
 );
 assert.match(noteCard, /scrollEnabled=\{false\}/);
@@ -3531,7 +3490,7 @@ const noteEditorLayoutEffectStart = noteCard.indexOf(
   noteCard.indexOf("const handleEditorFocus"),
 );
 const noteEditorSaveStart = noteCard.indexOf(
-  "const handleSave",
+  "const handleEditPress",
   noteEditorLayoutEffectStart,
 );
 assert.ok(
@@ -3553,11 +3512,8 @@ assert.match(
   /requestId: allocateNoteEditorGeometryRequestId\(\)|const requestId = allocateNoteEditorGeometryRequestId\(\)/,
   "each product reveal must receive its own monotonic request id",
 );
-assert.doesNotMatch(
-  noteCard,
-  /editorTextRevisionRef/,
-  "ordinary native text callbacks must not invalidate product geometry unless layout actually changes",
-);
+assert.match(noteCard, /contentRevisionRef\.current \+= 1/,
+  "same-length text replacement must invalidate native caret measurements");
 assert.match(
   noteCard,
   /const handleEditorContentSizeChange[\s\S]{0,1100}queueEditorGeometry\(nextHeight\)/,
@@ -3589,10 +3545,7 @@ assert.doesNotMatch(
   /isSaving|setIsSaving|await onSave|<ActivityIndicator/,
   "optimistically accepted note edits must close in the same event batch instead of rendering a redundant saving frame",
 );
-assert.match(
-  noteCard,
-  /if \(nextHasDraftText === hasDraftTextRef\.current\) return;/,
-);
+auditNoteEditorLifecycle({ noteCard, route: notesScreen });
 assert.match(noteCard, /underlineColorAndroid="transparent"/);
 assert.doesNotMatch(noteCard, /value=\{text\}/);
 assert.doesNotMatch(noteCard, /const \[text, setText\]/);
@@ -3631,7 +3584,7 @@ const noteEditorHandoffSource = noteCard.slice(
 );
 assert.match(
   noteEditorHandoffSource,
-  /const saveForEditorHandoff = React\.useCallback\(\(\) => \{[\s\S]{0,240}if \(!trimmed\)/,
+  /const saveForEditorHandoff = React\.useCallback\(\(dismissFocus = false\) => \{[\s\S]{0,240}if \(!trimmed\)/,
 );
 assertSourceOrder(
   noteEditorHandoffSource,
@@ -3642,7 +3595,7 @@ assertSourceOrder(
     "if (!onSave(note.id, trimmed)) {",
     "inputRef.current?.focus();",
     "return false;",
-    "leaveEditing();",
+    "leaveEditing(dismissFocus);",
     "return true;",
   ],
   "a non-empty draft must be committed before ownership moves to another card",
@@ -3727,7 +3680,7 @@ assert.match(
   noteInput,
   /getNoteComposerBottomPadding\(\{[\s\S]{0,120}bottomInset: insets\.bottom,[\s\S]{0,80}extraKeyboardLift,[\s\S]{0,80}keyboardVisible/,
 );
-assert.match(noteInput, /paddingTop: keyboardVisible \? 4 : 6,/);
+assert.match(noteInput, /paddingTop: keyboardVisible \? 2 : 3,/);
 assert.match(noteInput, /paddingBottom: bottomPadding \+ 2,/);
 assert.match(noteInput, /paddingRight: 6,/);
 assert.match(noteInput, /borderWidth: 1\.2,/);
@@ -3881,7 +3834,7 @@ const visualSnapshotProviderSource = screenPreferencesBoundary.slice(
   screenPreferencesBoundary.indexOf("interface ScreenVisualTreeProps"),
 );
 const themeProvider = read("src/theme/provider.tsx");
-const systemAppearance = read("src/theme/system-appearance.ts");
+const systemAppearance = read("src/theme/native-appearance.ts");
 const appRootLayout = read("app/_layout.tsx");
 const systemNavigationBar = read("src/utils/system-navigation-bar.ts");
 assert.match(appModal, /Platform\.OS === "android"/);
@@ -3941,7 +3894,7 @@ assert.doesNotMatch(
 );
 assert.match(
   screenPreferencesBoundary,
-  /function useLiveVisualPreferences\(\)[\s\S]{0,260}useSettingsStore\(\(state\) => state\.theme\)[\s\S]{0,260}useSystemColorMode\(\)/,
+  /function useLiveVisualPreferences\(\)[\s\S]{0,260}useSettingsStore\(\(state\) => state\.theme\)[\s\S]{0,260}useNativeColorMode\(\)/,
   "one application visual revision must update covered screens before Back reveals them",
 );
 const sceneI18nSource = read("src/i18n/scene-instance.ts");

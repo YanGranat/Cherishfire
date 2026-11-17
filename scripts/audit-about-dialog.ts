@@ -8,6 +8,7 @@ import * as colors from "../src/theme/colors";
 import * as tokens from "../src/theme/tokens";
 import { privacyPolicy } from "../src/features/settings/privacy-policy";
 import notices from "../assets/third_party_notices.json";
+import * as dialogLayout from "../src/components/ui/dialog-layout";
 
 interface Element {
   type: unknown;
@@ -165,16 +166,21 @@ function auditRendering(transform?: (source: string) => string): void {
     react: {
       useRef: (value: unknown) => ({ current: value }),
       useEffect: () => undefined,
+      useLayoutEffect: () => undefined,
+      useState: (initial: unknown) => [typeof initial === "function" ? initial() : initial, () => undefined],
     },
     "react-native": {
       View: "View",
       Text: "Text",
       Pressable: "Pressable",
       ScrollView: "ScrollView",
+      Keyboard: { metrics: () => undefined },
+      Platform: { OS: "android" },
       useWindowDimensions: () => ({ width: windowWidth, height: 800 }),
     },
     "@expo/vector-icons/MaterialIcons": "MaterialIcons",
     "@/theme/tokens": tokens,
+    "./dialog-layout": dialogLayout,
     "@/theme/colors": colors,
     "@/components/ScreenPreferencesBoundary": preferences,
     "@/components/ui/AppModal": {
@@ -309,7 +315,7 @@ function auditRendering(transform?: (source: string) => string): void {
           button.props.className,
           "min-h-[44px] px-md items-center justify-center active:opacity-60",
         );
-        assert.deepEqual(style(button.props.style), { paddingHorizontal: 0 });
+        assert.deepEqual(style(button.props.style), { maxWidth: "100%", paddingHorizontal: 0 });
         assert.deepEqual(button.props.accessibilityState, {
           disabled: undefined,
         });
@@ -342,7 +348,8 @@ function auditRendering(transform?: (source: string) => string): void {
           modal,
           "Pressable",
           (element) =>
-            element.props.className === "flex-1 items-center justify-center",
+            element.props.className === "flex-1" &&
+            style(element.props.style).backgroundColor === colors.scrimColor,
         );
         assert.equal(
           style(scrim.props.style).backgroundColor,

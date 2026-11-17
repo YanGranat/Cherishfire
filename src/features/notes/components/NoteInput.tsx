@@ -130,7 +130,7 @@ export const NoteInput = forwardRef<NoteInputHandle, NoteInputProps>(
             ? { height: 0, opacity: 0, overflow: "hidden" }
             : {
                 paddingHorizontal: 10,
-                paddingTop: keyboardVisible ? 4 : 6,
+                paddingTop: keyboardVisible ? 2 : 3,
                 paddingBottom: bottomPadding + 2,
               }
         }
@@ -151,6 +151,8 @@ export const NoteInput = forwardRef<NoteInputHandle, NoteInputProps>(
           <TextInput
             ref={inputRef}
             value={text}
+            selectionColor={accent}
+            cursorColor={accent}
             onChange={(event) => {
               const value = event.nativeEvent.text;
               textValueRef.current = value;

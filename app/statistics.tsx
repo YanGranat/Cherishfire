@@ -31,6 +31,7 @@ import {
   type StatisticsBlockId,
 } from "@/types/settings";
 import { normalizeStatisticsBlockOrder } from "@/utils/statistics-block-orders";
+import { getAdjacentReorder, type ReorderDirection } from "@/utils/accessibility-reorder";
 import { getMonthLabels, getWeekdayLabels, getWeekLabels } from "@/utils/date";
 import type { StatisticsPeriodStats } from "@/application/statistics/statistics-session";
 type StatsBlockId = StatisticsBlockId;
@@ -162,6 +163,20 @@ function StatisticsPeriodSceneView({
       onReorderPeriod(period, blockOrder, nextVisibleOrder),
     [blockOrder, onReorderPeriod, period],
   );
+  const handleMoveBlock = React.useCallback(
+    (id: StatsBlockId, direction: ReorderDirection) => {
+      const currentOrder = normalizeStatisticsBlockOrder(
+        useSettingsStore.getState().statisticsBlockOrders[period],
+        DEFAULT_STATISTICS_BLOCK_ORDER,
+      );
+      const visible = new Set(visibleOrder);
+      const nextVisibleOrder = getAdjacentReorder(
+        currentOrder.filter((blockId) => visible.has(blockId)), id, direction,
+      );
+      if (nextVisibleOrder) onReorderPeriod(period, currentOrder, nextVisibleOrder);
+    },
+    [onReorderPeriod, period, visibleOrder],
+  );
   if (stats.isEmpty) {
     return (
       <View style={{ flex: 1 }}>
@@ -183,6 +198,7 @@ function StatisticsPeriodSceneView({
       handleColor={handleColor}
       active={active}
       onReorder={handleReorder}
+      onMoveBlock={handleMoveBlock}
     />
   );
 }

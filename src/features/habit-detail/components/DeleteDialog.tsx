@@ -9,7 +9,7 @@ interface DeleteDialogProps {
   busy?: boolean;
   errorMessage?: string | null;
 }
-// Destructive confirmation; scrim presses do not dismiss it.
+// Destructive confirmation with a separate cancel action.
 export function DeleteDialog({
   visible,
   onCancel,
