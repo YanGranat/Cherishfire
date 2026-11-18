@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/c8818f02-9554-45f5-9ecc-86f4110e60ba
+
 # Cherishfire
 
 ![Cherishfire](Screenshots/cherishfire-hero.png)
@@ -23,6 +27,9 @@ An offline habit tracker with flexible schedules, notes, and progress statistics
 ## Preview
 
 ![Habit calendar, monthly repeat settings, and notes](Screenshots/cherishfire-overview.png)
+https://github.com/user-attachments/assets/2cd2120b-cfca-4136-8ae4-d0d9d95885d3
+
+
 
 ## Stack
 
