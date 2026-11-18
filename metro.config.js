@@ -9,7 +9,7 @@ config.resolver.sourceExts.push("sql");
 const defaultBlockList = config.resolver.blockList;
 config.resolver.blockList = [
   ...(Array.isArray(defaultBlockList) ? defaultBlockList : defaultBlockList ? [defaultBlockList] : []),
-  ...["temporary_files", "local_dev_docs", "artifacts", ".signing"].map((directory) => {
+  ...["workspace", "temporary_files", "local_dev_docs", "artifacts", ".signing"].map((directory) => {
     const absolutePath = path.resolve(__dirname, directory).split(path.sep)
       .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
       .join("[\\\\/]");

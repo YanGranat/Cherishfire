@@ -98,3 +98,4 @@ coverage/
 # Local working files
 temporary_files/
 local_dev_docs/
+/workspace/

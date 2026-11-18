@@ -41,14 +41,14 @@ function auditMetroFileBoundary(source: string): void {
     assert.ok(patterns.some((pattern) => pattern.source === inherited.source), "Metro defaults must remain active");
     assert.ok(blocked("inherited-exclusion/example.png"));
     assert.equal(new Set(patterns.map((pattern) => pattern.flags)).size, 1, "Metro combines exclusions only when their flags match");
-    for (const directory of ["temporary_files", "local_dev_docs", "artifacts", ".signing"]) {
+    for (const directory of ["workspace", "temporary_files", "local_dev_docs", "artifacts", ".signing"]) {
       assert.ok(blocked(`${directory}/nested/file.json`), "local-only work must not enter Metro's file map");
       const normalizedPath = platformPath.resolve(root, `${directory}/nested/file.json`).replace(/\\/g, "/");
       assert.ok(patterns.some((pattern) => pattern.test(normalizedPath)), "Metro's Windows watcher normalizes paths to POSIX separators");
       assert.ok(blocked(directory));
       assert.equal(blocked(`${directory}_other/file.json`), false);
     }
-    for (const file of ["app/index.tsx", "src/features/temporary_files/example.ts", "assets/icon.png", "scripts/fixtures/example.json"]) {
+    for (const file of ["app/index.tsx", "src/features/workspace/example.ts", "src/features/temporary_files/example.ts", "assets/icon.png", "scripts/fixtures/example.json"]) {
       assert.equal(blocked(file), false, "ordinary source and assets must remain resolvable");
     }
     assert.ok(module.exports.resolver.sourceExts.includes("sql"));
@@ -68,6 +68,9 @@ function auditMetroFileBoundary(source: string): void {
       }
     };
     for (const url of [
+      "/assets/workspace/example.png",
+      "/assets/workspace%2Fexample.png",
+      "/assets?unstable_path=workspace%2Fexample.png",
       "/assets/temporary_files/example.png?platform=android",
       "/assets/temporary_files%2Fexample.png",
       "/assets/assets/%2e%2e/temporary_files/example.png",
@@ -83,15 +86,18 @@ function auditMetroFileBoundary(source: string): void {
       `/assets?unstable_path=${encodeURIComponent(platformPath.resolve(root, "temporary_files/example.png"))}`,
     ]) request(url, true);
     if (platformPath === path.win32) {
+      request("/assets/Workspace/example.png", true);
+      request("/assets/workspace%5Cexample.png", true);
       request("/assets/Temporary_Files/example.png", true);
       request("/assets/temporary_files%5Cexample.png", true);
       request("/assets/TEMPOR~1/variant.png", true);
     }
-    for (const url of ["/assets/assets/icon.png", "/assets/temporary_files_other/icon.png", "/status", "/index.bundle", "/assets/%invalid", "/assets?unstable_path=assets/icon.png"]) request(url, false);
+    for (const url of ["/assets/assets/icon.png", "/assets/workspace_other/icon.png", "/assets/temporary_files_other/icon.png", "/status", "/index.bundle", "/assets/%invalid", "/assets?unstable_path=assets/icon.png"]) request(url, false);
   }
 }
 const metroConfigSource = fs.readFileSync("metro.config.js", "utf8");
 auditMetroFileBoundary(metroConfigSource);
+assert.throws(() => auditMetroFileBoundary(metroConfigSource.replace('"workspace", ', "")), { name: "AssertionError" });
 assert.throws(() => auditMetroFileBoundary(metroConfigSource.replace('"temporary_files", ', "")), { name: "AssertionError" });
 for (const [target, replacement] of [
   ["if (blockedAsset)", "if (false)"],
