@@ -11,7 +11,7 @@ import { View, Text, TextInput, Keyboard, PanResponder } from "react-native";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import { useTranslation } from "react-i18next";
 import { useVisualColorScheme, useVisualEffectiveMode } from "@/components/ScreenPreferencesBoundary";
-import { getAccentScheme, lightTheme } from "@/theme/colors";
+import { darkTheme, getAccentScheme, lightTheme } from "@/theme/colors";
 import {
   persistDescriptionVisibleLines,
   readPersistedDescriptionVisibleLines,
@@ -79,8 +79,7 @@ export const InlineDescription = React.memo(function InlineDescription({
   const sectionHeaderBackgroundColor = isDark ? "#2F2F2F" : lightTheme.surface;
   const sectionDividerColor = isDark ? "#6B6B6B" : lightTheme.divider;
   const sectionTitleColor = isDark ? "#D8D8D8" : lightTheme.muted;
-  const controlBorderColor = isDark ? "#666666" : lightTheme.border;
-  const controlBackgroundColor = isDark ? "#383838" : lightTheme.pressHighlight;
+  const placeholderColor = isDark ? darkTheme.muted : lightTheme.muted;
   const initialVisibleLinesRef = useRef<number | null>(null);
   if (initialVisibleLinesRef.current == null) {
     initialVisibleLinesRef.current =
@@ -291,66 +290,58 @@ export const InlineDescription = React.memo(function InlineDescription({
         </Text>
       </View>
 
-      <View className={editable ? "p-md pb-0" : "p-md"}>
-        {editable ? (
-          <TextInput
-            ref={descriptionInputRef}
-            value={text}
-            selection={previewSelectionActive && !editing ? PREVIEW_SELECTION : undefined}
-            selectionColor={accent}
-            cursorColor={accent}
-            onChange={(event) => handleTextChange(event.nativeEvent.text)}
-            editable={editable}
-            multiline
-            scrollEnabled={editing}
-            onFocus={handleInputFocus}
-            accessibilityLabel={t("detail.description")}
-            className="rounded-input border border-border bg-surface text-base text-primary"
-            style={{
-              minHeight: INPUT_MIN_HEIGHT,
-              height: inputHeight,
-              maxHeight: linesToHeight(MAX_VISIBLE_LINES),
-              backgroundColor: controlBackgroundColor,
-              paddingHorizontal: INPUT_HORIZONTAL_PADDING,
-              paddingTop: INPUT_VERTICAL_PADDING,
-              paddingBottom: editing ? INPUT_VERTICAL_PADDING : previewBottomPadding,
-              lineHeight: INPUT_LINE_HEIGHT,
-              borderColor: controlBorderColor,
-              borderWidth: 0.5,
-            }}
-            textAlignVertical="top"
-            returnKeyType="default"
-            blurOnSubmit={false}
-            placeholder={t("detail.description")}
-            placeholderTextColor="#9E9E9E"
-          />
-        ) : (
-          <View
-            className="rounded-input border border-border bg-surface"
-            style={{
-              minHeight: INPUT_MIN_HEIGHT,
-              height: inputHeight,
-              backgroundColor: controlBackgroundColor,
-              paddingHorizontal: INPUT_HORIZONTAL_PADDING,
-              paddingTop: INPUT_VERTICAL_PADDING,
-              paddingBottom: INPUT_VERTICAL_PADDING,
-              borderColor: controlBorderColor,
-              borderWidth: 0.5,
-            }}
+      {editable ? (
+        <TextInput
+          ref={descriptionInputRef}
+          value={text}
+          selection={previewSelectionActive && !editing ? PREVIEW_SELECTION : undefined}
+          selectionColor={accent}
+          cursorColor={accent}
+          onChange={(event) => handleTextChange(event.nativeEvent.text)}
+          editable={editable}
+          multiline
+          scrollEnabled={editing}
+          onFocus={handleInputFocus}
+          accessibilityLabel={t("detail.description")}
+          className="text-base text-primary"
+          style={{
+            minHeight: INPUT_MIN_HEIGHT,
+            height: inputHeight,
+            maxHeight: linesToHeight(MAX_VISIBLE_LINES),
+            paddingHorizontal: INPUT_HORIZONTAL_PADDING,
+            paddingTop: INPUT_VERTICAL_PADDING,
+            paddingBottom: editing ? INPUT_VERTICAL_PADDING : previewBottomPadding,
+            lineHeight: INPUT_LINE_HEIGHT,
+          }}
+          textAlignVertical="top"
+          underlineColorAndroid="transparent"
+          returnKeyType="default"
+          blurOnSubmit={false}
+          placeholder={t("detail.description")}
+          placeholderTextColor={placeholderColor}
+        />
+      ) : (
+        <View
+          style={{
+            minHeight: INPUT_MIN_HEIGHT,
+            height: inputHeight,
+            paddingHorizontal: INPUT_HORIZONTAL_PADDING,
+            paddingTop: INPUT_VERTICAL_PADDING,
+            paddingBottom: INPUT_VERTICAL_PADDING,
+          }}
+        >
+          <Text
+            numberOfLines={liveVisibleLines}
+            ellipsizeMode="tail"
+            className={
+              text.trim() ? "text-base text-primary" : "text-base text-muted"
+            }
+            style={{ lineHeight: INPUT_LINE_HEIGHT }}
           >
-            <Text
-              numberOfLines={liveVisibleLines}
-              ellipsizeMode="tail"
-              className={
-                text.trim() ? "text-base text-primary" : "text-base text-muted"
-              }
-              style={{ lineHeight: INPUT_LINE_HEIGHT }}
-            >
-              {text.trim() ? text : t("detail.description")}
-            </Text>
-          </View>
-        )}
-      </View>
+            {text.trim() ? text : t("detail.description")}
+          </Text>
+        </View>
+      )}
 
       {editable ? (
         <View

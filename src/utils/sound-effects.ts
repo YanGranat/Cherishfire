@@ -2,6 +2,7 @@ import { createAudioPlayer, setAudioModeAsync } from "expo-audio";
 import type { AudioMode, AudioPlayer } from "expo-audio";
 const habitExecutionSound = require("../../assets/sounds/sound_of_executing_a_habit.mp3");
 const SOUND_START_OFFSET_SEC = 0.012;
+const SOUND_PLAYBACK_VOLUME = 0.8;
 const SOUND_PREROLL_MS = 35;
 const SOUND_PREROLL_VOLUME = 0.001;
 let executionPlayer: AudioPlayer | null = null;
@@ -104,7 +105,7 @@ async function ensureExecutionPlayer(options?: {
       });
       candidate = player;
       player.loop = false;
-      player.volume = 1;
+      player.volume = SOUND_PLAYBACK_VOLUME;
       const loaded = await waitUntilLoaded(player);
       if (loaded) {
         await primePlayer(player);

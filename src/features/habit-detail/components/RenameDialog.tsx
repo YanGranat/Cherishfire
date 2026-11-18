@@ -1,5 +1,5 @@
 /** @jsxImportSource nativewind */
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Text, TextInput } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Dialog } from "@/components/ui/Dialog";
@@ -28,7 +28,8 @@ function RenameDialogSession({
   errorMessage,
   onDismiss,
 }: RenameDialogSessionProps) {
-  const [name, setName] = useState(() => currentName);
+  const draftRef = useRef(currentName);
+  const [hasName, setHasName] = useState(() => currentName.trim().length > 0);
   const { t } = useTranslation();
   const effectiveMode = useVisualEffectiveMode();
   const accent = getAccentScheme(useVisualColorScheme()).base;
@@ -39,14 +40,15 @@ function RenameDialogSession({
     : lightTheme.pressHighlight;
   const handleSave = () => {
     if (busy) return;
-    const trimmed = name.trim();
+    const trimmed = draftRef.current.trim();
     if (trimmed.length > 0) {
       onSave(trimmed);
       return;
     }
   };
   const handleNameChange = (value: string) => {
-    setName(value);
+    draftRef.current = value;
+    setHasName(value.trim().length > 0);
   };
   return (
     <Dialog
@@ -63,12 +65,12 @@ function RenameDialogSession({
         {
           label: t("rename.save"),
           onPress: handleSave,
-          disabled: busy || name.trim().length === 0,
+          disabled: busy || !hasName,
         },
       ]}
     >
       <TextInput
-        value={name}
+        defaultValue={currentName}
         selectionColor={accent}
         cursorColor={accent}
         onChange={(event) => handleNameChange(event.nativeEvent.text)}

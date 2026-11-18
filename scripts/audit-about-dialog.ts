@@ -140,6 +140,7 @@ function auditRendering(transform?: (source: string) => string): void {
   let language = "en";
   let windowWidth = 360;
   const closeCalls: unknown[][] = [];
+  const openedUrls: string[] = [];
   const onClose = (...args: unknown[]) => closeCalls.push(args);
   const preferences = {
     useVisualEffectiveMode: () => mode,
@@ -192,7 +193,10 @@ function auditRendering(transform?: (source: string) => string): void {
     aboutFile,
     "AboutDialog",
     {
-      "react-native": { View: "View", Text: "Text" },
+      "react-native": {
+        View: "View", Text: "Text", Pressable: "Pressable",
+        Linking: { openURL: async (url: string) => { openedUrls.push(url); } },
+      },
       "expo-constants": { expoConfig: { version: "9.8.7" } },
       "react-i18next": translation,
       "@/components/ui/Dialog": { Dialog },
@@ -236,7 +240,13 @@ function auditRendering(transform?: (source: string) => string): void {
     const palette = mode === "light" ? colors.lightTheme : colors.darkTheme;
     for (language of Object.keys(descriptions)) {
       const expected = resources.get(language)!;
+      openedUrls.length = 0;
       const about = AboutDialog({ visible: true, onClose });
+      assert.deepEqual(openedUrls, [], "rendering About must not open a browser");
+      const repositoryLink = only(about, "Pressable", (element) => element.props.accessibilityRole === "link");
+      assert.equal(only(repositoryLink, "Text").props.children, "GitHub");
+      (repositoryLink.props.onPress as () => void)();
+      assert.deepEqual(openedUrls, ["https://github.com/YanGranat/Cherishfire"]);
       assert.equal(about.type, Dialog);
       assert.equal(about.props.variant, "about");
       assert.equal(about.props.contentBackgroundColor, palette.menuSurface);
@@ -512,6 +522,7 @@ for (const [needle, replacement] of [
   ["paddingBottom: 12", "paddingBottom: 22"],
   ["onPress: onClose", "onPress: () => onClose(0)"],
   ['t("about.description")', 't("about.version")'],
+  ['onPress={openRepository}', 'onPress={onClose}'],
 ]) {
   assert.ok(
     readFileSync(resolve(aboutFile), "utf8").includes(needle),

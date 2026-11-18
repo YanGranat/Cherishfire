@@ -1,5 +1,5 @@
 /** @jsxImportSource nativewind */
-import { View, Text } from "react-native";
+import { Linking, Pressable, View, Text } from "react-native";
 import Constants from "expo-constants";
 import { useTranslation } from "react-i18next";
 import { Dialog } from "@/components/ui/Dialog";
@@ -9,14 +9,20 @@ interface AboutDialogProps {
   visible: boolean;
   onClose: () => void;
 }
-// Compact product dialog with title, description, and version.
-// No app icon or large logo - text only.
+const REPOSITORY_URL = "https://github.com/YanGranat/Cherishfire";
+
+function openRepository() {
+  void Linking.openURL(REPOSITORY_URL).catch(() => {
+    console.warn("Unable to open the project repository");
+  });
+}
+
 export function AboutDialog({ visible, onClose }: AboutDialogProps) {
   const { t } = useTranslation();
   const effectiveMode = useVisualEffectiveMode();
   const isDarkTheme = effectiveMode === "dark";
   const palette = isDarkTheme ? darkTheme : lightTheme;
-  const appVersion = Constants.expoConfig?.version ?? "1.5.126";
+  const appVersion = Constants.expoConfig?.version ?? "1.5.127";
   return (
     <Dialog
       visible={visible}
@@ -60,6 +66,15 @@ export function AboutDialog({ visible, onClose }: AboutDialogProps) {
         <Text className="text-sm" style={{ color: palette.muted }}>
           {t("about.version", { version: appVersion })}
         </Text>
+        <Pressable
+          accessibilityRole="link"
+          className="min-h-[44px] min-w-[44px] self-start justify-center active:opacity-60"
+          onPress={openRepository}
+        >
+          <Text className="text-sm underline" style={{ color: palette.primary }}>
+            GitHub
+          </Text>
+        </Pressable>
       </View>
     </Dialog>
   );

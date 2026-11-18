@@ -116,7 +116,7 @@ function mountComponent(source: string, exportName: string, props: Record<string
     },
     "@/theme/colors": {
       getAccentScheme: () => ({ base: accent }),
-      darkTheme: { border: "#555555" }, lightTheme: { border: "#DDDDDD", surfaceElevated: "#FFFFFF" },
+      darkTheme: { border: "#555555", muted: "#9E9E9E" }, lightTheme: { border: "#DDDDDD", surfaceElevated: "#FFFFFF", muted: "#757575" },
     },
     "@/composition/settings": { readPersistedDescriptionVisibleLines: () => initialDescriptionLines, persistDescriptionVisibleLines: async () => ({ status: "saved" }) },
     "@/application/settings/habit-description-lines-setting": {
@@ -472,6 +472,13 @@ export function auditNotesVisibility(overrides: Sources = {}): void {
     registerSaveHandler: (handler: (() => void) | null) => { saveDescription = handler; },
   });
   assert.deepEqual(description.input().props.selection, { start: 0, end: 0 }, "a nonediting description must begin at its first character");
+  const assertSingleSurface = (element: Element) => {
+    assert.doesNotMatch(element.props.className ?? "", /\bborder\b|\bbg-/);
+    assert.equal(element.props.style.backgroundColor, undefined);
+    assert.equal(element.props.style.borderWidth, undefined);
+  };
+  assertSingleSurface(description.input());
+  assert.equal(description.input().props.underlineColorAndroid, "transparent");
   description.input().props.onFocus(); description.render();
   assert.equal(description.input().props.selection, undefined, "editing must release native selection completely");
   description.input().props.onChange({ nativeEvent: { text: "An edited paragraph" } }); description.render();
@@ -503,6 +510,14 @@ export function auditNotesVisibility(overrides: Sources = {}): void {
     assert.equal(preview.input().props.style.paddingBottom, 10, "editing must retain the original native content viewport");
     preview.unmount();
   }
+  const archivedDescription = mountComponent(overrides.description ?? read(sourcePaths.description), "InlineDescription", {
+    habitId: 10, description: "A saved description", visible: true, editable: false, onSave: () => true,
+  });
+  const archivedBody = find(archivedDescription.render(), (element) => element.type === "View" && element.props.style?.height === 86);
+  assert.ok(archivedBody);
+  assertSingleSurface(archivedBody);
+  assert.equal(find(archivedDescription.render(), (element) => element.type === "TextInput"), null);
+  archivedDescription.unmount();
 
   let cancellations = 0;
   const renamed: string[] = [];
@@ -510,6 +525,9 @@ export function auditNotesVisibility(overrides: Sources = {}): void {
     visible: true, currentName: "Read a chapter", onCancel: () => { cancellations++; },
     onSave: (value: string) => renamed.push(value), onDismiss: () => {},
   });
+  assert.equal(rename.input().props.defaultValue, "Read a chapter");
+  assert.equal(rename.input().props.autoFocus, true);
+  assert.equal(rename.input().props.selectTextOnFocus, true);
   rename.input().props.onChange({ nativeEvent: { text: "   " } }); rename.render();
   let [cancel, save] = rename.dialog().props.actions;
   assert.equal(save.disabled, true, "an empty name must disable only Save");
@@ -518,10 +536,15 @@ export function auditNotesVisibility(overrides: Sources = {}): void {
   save.onPress(); assert.deepEqual(renamed, []);
   cancel.onPress(); assert.equal(cancellations, 1);
   rename.input().props.onChange({ nativeEvent: { text: "  Evening walk  " } }); rename.render();
+  assert.equal(rename.input().props.value, undefined, "the native editor must own the typed text");
+  assert.equal(rename.input().props.selection, undefined, "typing must not resend a selection");
+  assert.equal(rename.input().props.defaultValue, "Read a chapter", "typing must not change the session seed");
   [, save] = rename.dialog().props.actions;
-  assert.equal(save.disabled, false); save.onPress(); assert.deepEqual(renamed, ["Evening walk"]);
+  assert.equal(save.disabled, false);
+  rename.input().props.onChange({ nativeEvent: { text: "  Evening hill walk  " } });
+  save.onPress(); assert.deepEqual(renamed, ["Evening hill walk"], "Save must read the latest text before a render");
   rename.props.busy = true; rename.render();
-  rename.dialog().props.actions[1].onPress(); assert.deepEqual(renamed, ["Evening walk"], "a busy dialog must not submit twice");
+  rename.dialog().props.actions[1].onPress(); assert.deepEqual(renamed, ["Evening hill walk"], "a busy dialog must not submit twice");
   rename.setAccent("#6B45A8");
   assert.equal(rename.input().props.selectionColor, "#6B45A8");
   assert.equal(rename.input().props.cursorColor, "#6B45A8");
@@ -557,5 +580,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const noteInput = read("src/features/notes/components/NoteInput.tsx");
   assert.ok(noteInput.includes("hitSlop={3}"));
   assert.throws(() => auditNotesVisibility({ noteInput: noteInput.replace("hitSlop={3}", "hitSlop={0}") }), { name: "AssertionError" });
+  const rename = read(sourcePaths.rename);
+  assert.throws(() => auditNotesVisibility({ rename: rename.replace('defaultValue={currentName}', 'defaultValue={currentName} value={draftRef.current}') }), { name: "AssertionError", message: /native editor must own/ });
   console.log("Notes visibility and editing audit passed.");
 }

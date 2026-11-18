@@ -1796,11 +1796,6 @@ assert.match(
   aboutDialog,
   /fontSize: 20,[\s\S]{0,80}lineHeight: 26,[\s\S]{0,80}fontWeight: "400",[\s\S]{0,80}marginBottom: 16/,
 );
-assert.doesNotMatch(
-  aboutDialog,
-  /GitHub|github|Linking\.openURL|REPOSITORY_URL/,
-  "About must not initiate external navigation",
-);
 assert.match(failureReasonDialog, /status === "skipped"/);
 assert.match(failureReasonDialog, /const \[isSubmitting, setIsSubmitting\]/);
 assert.match(failureReasonDialog, /const isSubmittingRef = useRef\(false\)/);
@@ -4492,10 +4487,6 @@ assertDeferredPersistence(
   "allDayRecordsByDateCache[date] = optimisticList;",
   "habitPersistence.unmarkDay(habitId, date)",
   "day unmark",
-);
-assert.match(
-  inlineDescription,
-  /controlBackgroundColor = isDark \? "#383838" : lightTheme\.pressHighlight/,
 );
 assert.match(inlineDescription, /onFocus=\{handleInputFocus\}/);
 assert.match(inlineDescription, /scrollEnabled=\{editing\}/);

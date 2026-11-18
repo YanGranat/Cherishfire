@@ -2990,11 +2990,50 @@ async function auditFutureReasonStoreRefusal(removeFutureGuard = false): Promise
   assert.deepEqual(loaded.persistence.snapshotRecords(), [],
     "future reason refusal must not persist a record");
 }
+async function auditExecutionSound(source: string): Promise<void> {
+  const volumes: number[] = [];
+  let failPlayback = false;
+  let created = 0;
+  let removed = 0;
+  const exports = {} as Record<"warmupHabitExecutionSound" | "playHabitExecutionSound", () => Promise<void>>;
+  runInNewContext(ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText, {
+    exports,
+    setTimeout: queueMicrotask,
+    require: (name: string) => name === "expo-audio" ? {
+      setAudioModeAsync: async () => {},
+      createAudioPlayer: () => {
+        created++;
+        return {
+          volume: 1, loop: true, isLoaded: true, seekTo: async () => {}, pause() {},
+          remove() { removed++; },
+          play() {
+            if (failPlayback) { failPlayback = false; throw new Error("Playback unavailable"); }
+            volumes.push(this.volume);
+          },
+        };
+      },
+    } : "sound",
+  });
+  await Promise.all([exports.warmupHabitExecutionSound(), exports.playHabitExecutionSound()]);
+  failPlayback = true;
+  await exports.playHabitExecutionSound();
+  assert.equal(created, 2);
+  assert.equal(removed, 1);
+  assert.deepEqual(volumes, [0.001, 0.8, 0.001, 0.8], "warmup and retry must restore the playback gain");
+}
+
 const auditDeadline = setTimeout(() => {
   console.error("Home interactions audit did not complete within 10 seconds");
   process.exitCode = 1;
 }, 10_000);
 void (async () => {
+  const executionSound = read("src/utils/sound-effects.ts");
+  await auditExecutionSound(executionSound);
+  await assert.rejects(() => auditExecutionSound(executionSound.replace("SOUND_PLAYBACK_VOLUME = 0.8", "SOUND_PLAYBACK_VOLUME = 1")), {
+    name: "AssertionError", message: /restore the playback gain/,
+  });
   await auditReasonDialogCancellation(loadTsxCallable);
   await auditFutureReasonStoreRefusal();
   await auditAccessibleOrderPersistence();
@@ -3002,8 +3041,8 @@ void (async () => {
     name: "AssertionError", message: /actual store must refuse/,
   });
   console.log(
-    "Home interactions audit passed: " + (audits.length + 2) +
-      " product groups, 6 height-seed mutants and " + (mutations - 6 + 1) +
+    "Home interactions audit passed: " + (audits.length + 3) +
+      " product groups, 6 height-seed mutants and " + (mutations - 6 + 2) +
       " interaction mutants.",
   );
 })().catch((error) => {
